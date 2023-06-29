@@ -1,20 +1,20 @@
-# Subnet EVM
+# EVM Based Enterprise Consortia Chain
 
 Dijets is a network composed of multiple blockchains.
 Each blockchain is an instance of a Virtual Machine (VM), much like an object in an object-oriented language is an instance of a class.
 That is, the VM defines the behavior of the blockchain.
 
-Subnet EVM is the Virtual Machine (VM) that defines the Subnet Contract Chains. Subnet EVM is a simplified version of [Coreth VM (C-Chain)](https://github.com/lasthyphen/utilitychain).
+ECC-EVM Engine is the Virtual Machine (VM) that defines the Subnet Contract Chains. ECC-EVM Engine is a simplified version of [Coreth VM (Utility Chain)](https://github.com/lasthyphen/utilitychain).
 
 This chain implements the Ethereum Virtual Machine and supports Solidity smart contracts as well as most other Ethereum client functionality.
 
 ## Building
 
-The Subnet EVM runs in a separate process from the main DIJETSNODE process and communicates with it over a local gRPC connection.
+The ECC-EVM Engine runs in a separate process from the main DIJETSNODE process and communicates with it over a local gRPC connection.
 
 ## API
 
-The Subnet EVM supports the following API namespaces:
+The ECC-EVM Engine supports the following API namespaces:
 
 - `eth`
 - `personal`
@@ -25,18 +25,18 @@ Only the `eth` namespace is enabled by default.
 
 ## Compatibility
 
-The Subnet EVM is compatible with almost all Ethereum tooling, including Remix, Metamask and Truffle.
+The ECC-EVM Engine is compatible with almost all Ethereum tooling, including Remix, Metamask and Truffle.
 
-## Differences Between Subnet EVM and Coreth
+## Differences Between ECC-EVM Engine and Coreth
 
 - Added configurable fees and gas limits in genesis
-- Merged Dijets hardforks into the single "Subnet EVM" hardfork
+- Merged Dijets hardforks into the single "ECC-EVM Engine" hardfork
 - Removed Atomic Txs and Shared Memory
 - Removed Multicoin Contract and State
 
 ## Block Format
 
-To support these changes, there have been a number of changes to the SubnetEVM block format compared to what exists on the C-Chain and Ethereum. Here we list the changes to the block format as compared to Ethereum.
+To support these changes, there have been a number of changes to the SubnetEVM block format compared to what exists on the Utility Chain and Ethereum. Here we list the changes to the block format as compared to Ethereum.
 
 ### Block Header
 
