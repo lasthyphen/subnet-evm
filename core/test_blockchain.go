@@ -9,17 +9,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lasthyphen/subnet-evm/commontype"
 	"github.com/lasthyphen/subnet-evm/consensus/dummy"
 	"github.com/lasthyphen/subnet-evm/core/rawdb"
 	"github.com/lasthyphen/subnet-evm/core/state"
 	"github.com/lasthyphen/subnet-evm/core/types"
 	"github.com/lasthyphen/subnet-evm/ethdb"
 	"github.com/lasthyphen/subnet-evm/params"
-	"github.com/lasthyphen/subnet-evm/precompile"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/stretchr/testify/assert"
 )
 
 type ChainTest struct {
@@ -75,10 +72,6 @@ var tests = []ChainTest{
 		"InsertChainValidBlockFee",
 		TestInsertChainValidBlockFee,
 	},
-	{
-		"TestStatefulPrecompiles",
-		TestStatefulPrecompiles,
-	},
 }
 
 func copyMemDB(db ethdb.Database) (ethdb.Database, error) {
@@ -95,7 +88,7 @@ func copyMemDB(db ethdb.Database) (ethdb.Database, error) {
 }
 
 // checkBlockChainState creates a new BlockChain instance and checks that exporting each block from
-// genesis to last accepted from the original instance yields the same last accepted block and state
+// genesis to last acceptd from the original instance yields the same last accepted block and state
 // root.
 // Additionally, create another BlockChain instance from [originalDB] to ensure that BlockChain is
 // persisted correctly through a restart.
@@ -109,7 +102,7 @@ func checkBlockChainState(
 ) (*BlockChain, *BlockChain, *BlockChain) {
 	var (
 		chainConfig       = bc.Config()
-		lastAcceptedBlock = bc.LastConsensusAcceptedBlock()
+		lastAcceptedBlock = bc.LastAcceptedBlock()
 		newDB             = rawdb.NewMemoryDatabase()
 	)
 
@@ -140,9 +133,8 @@ func checkBlockChainState(
 			t.Fatalf("Failed to accept block %s:%d due to %s", block.Hash().Hex(), block.NumberU64(), err)
 		}
 	}
-	newBlockChain.DrainAcceptorQueue()
 
-	newLastAcceptedBlock := newBlockChain.LastConsensusAcceptedBlock()
+	newLastAcceptedBlock := newBlockChain.LastAcceptedBlock()
 	if newLastAcceptedBlock.Hash() != lastAcceptedBlock.Hash() {
 		t.Fatalf("Expected new blockchain to have last accepted block %s:%d, but found %s:%d", lastAcceptedBlock.Hash().Hex(), lastAcceptedBlock.NumberU64(), newLastAcceptedBlock.Hash().Hex(), newLastAcceptedBlock.NumberU64())
 	}
@@ -169,7 +161,7 @@ func checkBlockChainState(
 	if currentBlock := restartedChain.CurrentBlock(); currentBlock.Hash() != lastAcceptedBlock.Hash() {
 		t.Fatalf("Expected restarted chain to have current block %s:%d, but found %s:%d", lastAcceptedBlock.Hash().Hex(), lastAcceptedBlock.NumberU64(), currentBlock.Hash().Hex(), currentBlock.NumberU64())
 	}
-	if restartedLastAcceptedBlock := restartedChain.LastConsensusAcceptedBlock(); restartedLastAcceptedBlock.Hash() != lastAcceptedBlock.Hash() {
+	if restartedLastAcceptedBlock := restartedChain.LastAcceptedBlock(); restartedLastAcceptedBlock.Hash() != lastAcceptedBlock.Hash() {
 		t.Fatalf("Expected restarted chain to have current block %s:%d, but found %s:%d", lastAcceptedBlock.Hash().Hex(), lastAcceptedBlock.NumberU64(), restartedLastAcceptedBlock.Hash().Hex(), restartedLastAcceptedBlock.NumberU64())
 	}
 
@@ -231,7 +223,6 @@ func TestInsertChainAcceptSingleBlock(t *testing.T, create func(db ethdb.Databas
 	if err := blockchain.Accept(chain[0]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
 
 	// check the state of the last accepted block
 	checkState := func(sdb *state.StateDB) error {
@@ -355,7 +346,6 @@ func TestInsertLongForkedChain(t *testing.T, create func(db ethdb.Database, chai
 	if err := blockchain.Accept(chain1[0]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
 
 	if blockchain.snaps != nil {
 		// Snap layer count should be 1 fewer
@@ -387,7 +377,6 @@ func TestInsertLongForkedChain(t *testing.T, create func(db ethdb.Database, chai
 		if err := blockchain.Accept(chain1[i]); err != nil {
 			t.Fatal(err)
 		}
-		blockchain.DrainAcceptorQueue()
 
 		if blockchain.snaps != nil {
 			// Snap layer count should decrease by 1 per Accept
@@ -397,7 +386,7 @@ func TestInsertLongForkedChain(t *testing.T, create func(db ethdb.Database, chai
 		}
 	}
 
-	lastAcceptedBlock := blockchain.LastConsensusAcceptedBlock()
+	lastAcceptedBlock := blockchain.LastAcceptedBlock()
 	expectedLastAcceptedBlock := chain1[len(chain1)-1]
 	if lastAcceptedBlock.Hash() != expectedLastAcceptedBlock.Hash() {
 		t.Fatalf("Expected last accepted block to be %s:%d, but found %s%d", expectedLastAcceptedBlock.Hash().Hex(), expectedLastAcceptedBlock.NumberU64(), lastAcceptedBlock.Hash().Hex(), lastAcceptedBlock.NumberU64())
@@ -503,15 +492,13 @@ func TestAcceptNonCanonicalBlock(t *testing.T, create func(db ethdb.Database, ch
 	if err := blockchain.Accept(chain2[0]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
-
 	for i := 0; i < len(chain1); i++ {
 		if err := blockchain.Reject(chain1[i]); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	lastAcceptedBlock := blockchain.LastConsensusAcceptedBlock()
+	lastAcceptedBlock := blockchain.LastAcceptedBlock()
 	expectedLastAcceptedBlock := chain2[0]
 	if lastAcceptedBlock.Hash() != expectedLastAcceptedBlock.Hash() {
 		t.Fatalf("Expected last accepted block to be %s:%d, but found %s%d", expectedLastAcceptedBlock.Hash().Hex(), expectedLastAcceptedBlock.NumberU64(), lastAcceptedBlock.Hash().Hex(), lastAcceptedBlock.NumberU64())
@@ -613,7 +600,7 @@ func TestSetPreferenceRewind(t *testing.T, create func(db ethdb.Database, chainC
 		t.Fatalf("Expected current block to be %s:%d, but found %s%d", expectedCurrentBlock.Hash().Hex(), expectedCurrentBlock.NumberU64(), currentBlock.Hash().Hex(), currentBlock.NumberU64())
 	}
 
-	lastAcceptedBlock := blockchain.LastConsensusAcceptedBlock()
+	lastAcceptedBlock := blockchain.LastAcceptedBlock()
 	expectedLastAcceptedBlock := blockchain.Genesis()
 	if lastAcceptedBlock.Hash() != expectedLastAcceptedBlock.Hash() {
 		t.Fatalf("Expected last accepted block to be %s:%d, but found %s%d", expectedLastAcceptedBlock.Hash().Hex(), expectedLastAcceptedBlock.NumberU64(), lastAcceptedBlock.Hash().Hex(), lastAcceptedBlock.NumberU64())
@@ -646,9 +633,7 @@ func TestSetPreferenceRewind(t *testing.T, create func(db ethdb.Database, chainC
 	if err := blockchain.Accept(chain[0]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
-
-	lastAcceptedBlock = blockchain.LastConsensusAcceptedBlock()
+	lastAcceptedBlock = blockchain.LastAcceptedBlock()
 	expectedLastAcceptedBlock = chain[0]
 	if lastAcceptedBlock.Hash() != expectedLastAcceptedBlock.Hash() {
 		t.Fatalf("Expected last accepted block to be %s:%d, but found %s%d", expectedLastAcceptedBlock.Hash().Hex(), expectedLastAcceptedBlock.NumberU64(), lastAcceptedBlock.Hash().Hex(), lastAcceptedBlock.NumberU64())
@@ -773,8 +758,6 @@ func TestBuildOnVariousStages(t *testing.T, create func(db ethdb.Database, chain
 			t.Fatal(err)
 		}
 	}
-	blockchain.DrainAcceptorQueue()
-
 	// Insert the forked chain [chain2] which starts at the 10th
 	// block in [chain1] ie. a block that is still in processing.
 	if _, err := blockchain.InsertChain(chain2); err != nil {
@@ -790,7 +773,6 @@ func TestBuildOnVariousStages(t *testing.T, create func(db ethdb.Database, chain
 	if err := blockchain.Accept(chain1[5]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
 	for _, block := range chain3 {
 		if err := blockchain.Reject(block); err != nil {
 			t.Fatal(err)
@@ -802,15 +784,12 @@ func TestBuildOnVariousStages(t *testing.T, create func(db ethdb.Database, chain
 			t.Fatal(err)
 		}
 	}
-	blockchain.DrainAcceptorQueue()
 
 	// Accept the first block in [chain2] and reject the
 	// subsequent blocks in [chain1] which would then be rejected.
 	if err := blockchain.Accept(chain2[0]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
-
 	for _, block := range chain1[10:] {
 		if err := blockchain.Reject(block); err != nil {
 			t.Fatal(err)
@@ -894,7 +873,6 @@ func TestEmptyBlocks(t *testing.T, create func(db ethdb.Database, chainConfig *p
 			t.Fatal(err)
 		}
 	}
-	blockchain.DrainAcceptorQueue()
 
 	// Nothing to assert about the state
 	checkState := func(sdb *state.StateDB) error {
@@ -949,7 +927,6 @@ func TestReorgReInsert(t *testing.T, create func(db ethdb.Database, chainConfig 
 	if err := blockchain.Accept(chain[0]); err != nil {
 		t.Fatal(err)
 	}
-
 	// Insert block and then set preference back (rewind) to last accepted blck
 	if err := blockchain.InsertBlock(chain[1]); err != nil {
 		t.Fatal(err)
@@ -957,7 +934,6 @@ func TestReorgReInsert(t *testing.T, create func(db ethdb.Database, chainConfig 
 	if err := blockchain.SetPreference(chain[0]); err != nil {
 		t.Fatal(err)
 	}
-
 	// Re-insert and accept block
 	if err := blockchain.InsertBlock(chain[1]); err != nil {
 		t.Fatal(err)
@@ -965,7 +941,6 @@ func TestReorgReInsert(t *testing.T, create func(db ethdb.Database, chainConfig 
 	if err := blockchain.Accept(chain[1]); err != nil {
 		t.Fatal(err)
 	}
-
 	// Build on top of the re-inserted block and accept
 	if err := blockchain.InsertBlock(chain[2]); err != nil {
 		t.Fatal(err)
@@ -973,7 +948,6 @@ func TestReorgReInsert(t *testing.T, create func(db ethdb.Database, chainConfig 
 	if err := blockchain.Accept(chain[2]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
 
 	// Nothing to assert about the state
 	checkState := func(sdb *state.StateDB) error {
@@ -1092,8 +1066,6 @@ func TestAcceptBlockIdenticalStateRoot(t *testing.T, create func(db ethdb.Databa
 	if err := blockchain.Accept(chain1[0]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
-
 	for _, block := range chain2 {
 		if err := blockchain.Reject(block); err != nil {
 			t.Fatal(err)
@@ -1106,9 +1078,8 @@ func TestAcceptBlockIdenticalStateRoot(t *testing.T, create func(db ethdb.Databa
 	if err := blockchain.Accept(chain1[1]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
 
-	lastAcceptedBlock := blockchain.LastConsensusAcceptedBlock()
+	lastAcceptedBlock := blockchain.LastAcceptedBlock()
 	expectedLastAcceptedBlock := chain1[1]
 	if lastAcceptedBlock.Hash() != expectedLastAcceptedBlock.Hash() {
 		t.Fatalf("Expected last accepted block to be %s:%d, but found %s%d", expectedLastAcceptedBlock.Hash().Hex(), expectedLastAcceptedBlock.NumberU64(), lastAcceptedBlock.Hash().Hex(), lastAcceptedBlock.NumberU64())
@@ -1120,7 +1091,6 @@ func TestAcceptBlockIdenticalStateRoot(t *testing.T, create func(db ethdb.Databa
 	if err := blockchain.Accept(chain1[2]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
 
 	// check the state of the last accepted block
 	checkState := func(sdb *state.StateDB) error {
@@ -1262,8 +1232,6 @@ func TestReprocessAcceptBlockIdenticalStateRoot(t *testing.T, create func(db eth
 	if err := blockchain.Accept(chain1[0]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
-
 	for _, block := range chain2 {
 		if err := blockchain.Reject(block); err != nil {
 			t.Fatal(err)
@@ -1276,9 +1244,8 @@ func TestReprocessAcceptBlockIdenticalStateRoot(t *testing.T, create func(db eth
 	if err := blockchain.Accept(chain1[1]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
 
-	lastAcceptedBlock := blockchain.LastConsensusAcceptedBlock()
+	lastAcceptedBlock := blockchain.LastAcceptedBlock()
 	expectedLastAcceptedBlock := chain1[1]
 	if lastAcceptedBlock.Hash() != expectedLastAcceptedBlock.Hash() {
 		t.Fatalf("Expected last accepted block to be %s:%d, but found %s%d", expectedLastAcceptedBlock.Hash().Hex(), expectedLastAcceptedBlock.NumberU64(), lastAcceptedBlock.Hash().Hex(), lastAcceptedBlock.NumberU64())
@@ -1290,7 +1257,6 @@ func TestReprocessAcceptBlockIdenticalStateRoot(t *testing.T, create func(db eth
 	if err := blockchain.Accept(chain1[2]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
 
 	// check the state of the last accepted block
 	checkState := func(sdb *state.StateDB) error {
@@ -1496,7 +1462,6 @@ func TestInsertChainValidBlockFee(t *testing.T, create func(db ethdb.Database, c
 	if err := blockchain.Accept(chain[0]); err != nil {
 		t.Fatal(err)
 	}
-	blockchain.DrainAcceptorQueue()
 
 	// check the state of the last accepted block
 	checkState := func(sdb *state.StateDB) error {
@@ -1526,198 +1491,5 @@ func TestInsertChainValidBlockFee(t *testing.T, create func(db ethdb.Database, c
 		return nil
 	}
 
-	checkBlockChainState(t, blockchain, gspec, chainDB, create, checkState)
-}
-
-// TestStatefulPrecompiles provides a testing framework to ensure that processing transactions interacting with the stateful precompiles work as expected.
-func TestStatefulPrecompiles(t *testing.T, create func(db ethdb.Database, chainConfig *params.ChainConfig, lastAcceptedHash common.Hash) (*BlockChain, error)) {
-	var (
-		key1, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
-		key2, _ = crypto.HexToECDSA("8a1f9a8f95be41cd7ccb6168179afb4504aefe388d1e14474d32c45c72ce7b7a")
-		addr1   = crypto.PubkeyToAddress(key1.PublicKey)
-		addr2   = crypto.PubkeyToAddress(key2.PublicKey)
-		// We use two separate databases since GenerateChain commits the state roots to its underlying
-		// database.
-		genDB   = rawdb.NewMemoryDatabase()
-		chainDB = rawdb.NewMemoryDatabase()
-	)
-
-	// Ensure that key1 has sufficient funds in the genesis block for all of the tests.
-	genesisBalance := new(big.Int).Mul(big.NewInt(1000000), big.NewInt(params.Ether))
-	config := *params.TestChainConfig
-	// Set all of the required config parameters
-	config.ContractDeployerAllowListConfig = precompile.NewContractDeployerAllowListConfig(big.NewInt(0), []common.Address{addr1}, nil)
-	config.FeeManagerConfig = precompile.NewFeeManagerConfig(big.NewInt(0), []common.Address{addr1}, nil, nil)
-	gspec := &Genesis{
-		Config: &config,
-		Alloc:  GenesisAlloc{addr1: {Balance: genesisBalance}},
-	}
-	genesis := gspec.MustCommit(genDB)
-	_ = gspec.MustCommit(chainDB)
-
-	blockchain, err := create(chainDB, gspec.Config, common.Hash{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer blockchain.Stop()
-
-	signer := types.LatestSigner(params.TestChainConfig)
-	tip := big.NewInt(50000 * params.GWei)
-
-	// Simple framework to add a test that the stateful precompile works as expected
-	type test struct {
-		addTx         func(gen *BlockGen)
-		verifyGenesis func(sdb *state.StateDB)
-		verifyState   func(sdb *state.StateDB) error
-	}
-	testFeeConfig := commontype.FeeConfig{
-		GasLimit:        big.NewInt(11_000_000),
-		TargetBlockRate: 5, // in seconds
-
-		MinBaseFee:               big.NewInt(28_000_000_000),
-		TargetGas:                big.NewInt(18_000_000),
-		BaseFeeChangeDenominator: big.NewInt(3396),
-
-		MinBlockGasCost:  big.NewInt(0),
-		MaxBlockGasCost:  big.NewInt(4_000_000),
-		BlockGasCostStep: big.NewInt(500_000),
-	}
-	assert := assert.New(t)
-	tests := map[string]test{
-		"allow list": {
-			addTx: func(gen *BlockGen) {
-				feeCap := new(big.Int).Add(gen.BaseFee(), tip)
-				input, err := precompile.PackModifyAllowList(addr2, precompile.AllowListAdmin)
-				if err != nil {
-					t.Fatal(err)
-				}
-				tx := types.NewTx(&types.DynamicFeeTx{
-					ChainID:   params.TestChainConfig.ChainID,
-					Nonce:     gen.TxNonce(addr1),
-					To:        &precompile.ContractDeployerAllowListAddress,
-					Gas:       3_000_000,
-					Value:     common.Big0,
-					GasFeeCap: feeCap,
-					GasTipCap: tip,
-					Data:      input,
-				})
-
-				signedTx, err := types.SignTx(tx, signer, key1)
-				if err != nil {
-					t.Fatal(err)
-				}
-				gen.AddTx(signedTx)
-			},
-			verifyState: func(sdb *state.StateDB) error {
-				res := precompile.GetContractDeployerAllowListStatus(sdb, addr1)
-				if precompile.AllowListAdmin != res {
-					return fmt.Errorf("unexpected allow list status for addr1 %s, expected %s", res, precompile.AllowListAdmin)
-				}
-				res = precompile.GetContractDeployerAllowListStatus(sdb, addr2)
-				if precompile.AllowListAdmin != res {
-					return fmt.Errorf("unexpected allow list status for addr2 %s, expected %s", res, precompile.AllowListAdmin)
-				}
-				return nil
-			},
-			verifyGenesis: func(sdb *state.StateDB) {
-				res := precompile.GetContractDeployerAllowListStatus(sdb, addr1)
-				if precompile.AllowListAdmin != res {
-					t.Fatalf("unexpected allow list status for addr1 %s, expected %s", res, precompile.AllowListAdmin)
-				}
-				res = precompile.GetContractDeployerAllowListStatus(sdb, addr2)
-				if precompile.AllowListNoRole != res {
-					t.Fatalf("unexpected allow list status for addr2 %s, expected %s", res, precompile.AllowListNoRole)
-				}
-			},
-		},
-		"fee manager set config": {
-			addTx: func(gen *BlockGen) {
-				feeCap := new(big.Int).Add(gen.BaseFee(), tip)
-				input, err := precompile.PackSetFeeConfig(testFeeConfig)
-				if err != nil {
-					t.Fatal(err)
-				}
-				tx := types.NewTx(&types.DynamicFeeTx{
-					ChainID:   params.TestChainConfig.ChainID,
-					Nonce:     gen.TxNonce(addr1),
-					To:        &precompile.FeeConfigManagerAddress,
-					Gas:       3_000_000,
-					Value:     common.Big0,
-					GasFeeCap: feeCap,
-					GasTipCap: tip,
-					Data:      input,
-				})
-
-				signedTx, err := types.SignTx(tx, signer, key1)
-				if err != nil {
-					t.Fatal(err)
-				}
-				gen.AddTx(signedTx)
-			},
-			verifyState: func(sdb *state.StateDB) error {
-				res := precompile.GetFeeConfigManagerStatus(sdb, addr1)
-				assert.Equal(precompile.AllowListAdmin, res)
-
-				storedConfig := precompile.GetStoredFeeConfig(sdb)
-				assert.EqualValues(testFeeConfig, storedConfig)
-
-				feeConfig, _, err := blockchain.GetFeeConfigAt(blockchain.CurrentHeader())
-				assert.NoError(err)
-				assert.EqualValues(testFeeConfig, feeConfig)
-				return nil
-			},
-			verifyGenesis: func(sdb *state.StateDB) {
-				res := precompile.GetFeeConfigManagerStatus(sdb, addr1)
-				assert.Equal(precompile.AllowListAdmin, res)
-
-				feeConfig, _, err := blockchain.GetFeeConfigAt(blockchain.Genesis().Header())
-				assert.NoError(err)
-				assert.EqualValues(config.FeeConfig, feeConfig)
-			},
-		},
-	}
-
-	// Generate chain of blocks using [genDB] instead of [chainDB] to avoid writing
-	// to the BlockChain's database while generating blocks.
-	chain, _, err := GenerateChain(gspec.Config, genesis, blockchain.engine, genDB, 1, 0, func(i int, gen *BlockGen) {
-		for _, test := range tests {
-			test.addTx(gen)
-		}
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Insert three blocks into the chain and accept only the first block.
-	if _, err := blockchain.InsertChain(chain); err != nil {
-		t.Fatal(err)
-	}
-	if err := blockchain.Accept(chain[0]); err != nil {
-		t.Fatal(err)
-	}
-	blockchain.DrainAcceptorQueue()
-
-	genesisState, err := blockchain.StateAt(blockchain.Genesis().Root())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range tests {
-		if test.verifyGenesis == nil {
-			continue
-		}
-		test.verifyGenesis(genesisState)
-	}
-
-	// Run all of the necessary state verification
-	checkState := func(sdb *state.StateDB) error {
-		for _, test := range tests {
-			if err := test.verifyState(sdb); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	// This tests that the precompiles work as expected when they are enabled
 	checkBlockChainState(t, blockchain, gspec, chainDB, create, checkState)
 }

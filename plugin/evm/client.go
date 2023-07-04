@@ -4,71 +4,60 @@
 package evm
 
 import (
-	"context"
 	"fmt"
+	"time"
 
-	"github.com/lasthyphen/dijetsnode/api"
-	"github.com/lasthyphen/dijetsnode/utils/rpc"
+	"github.com/lasthyphen/dijetalgo/api"
+	"github.com/lasthyphen/dijetalgo/utils/rpc"
 	"github.com/ethereum/go-ethereum/log"
 )
 
-// Interface compliance
-var _ Client = (*client)(nil)
-
-// Client interface for interacting with EVM [chain]
-type Client interface {
-	StartCPUProfiler(ctx context.Context) error
-	StopCPUProfiler(ctx context.Context) error
-	MemoryProfile(ctx context.Context) error
-	LockProfile(ctx context.Context) error
-	SetLogLevel(ctx context.Context, level log.Lvl) error
-	GetVMConfig(ctx context.Context) (*Config, error)
-}
-
-// Client implementation for interacting with EVM [chain]
-type client struct {
-	requester rpc.EndpointRequester
+// Client ...
+type Client struct {
+	adminRequester rpc.EndpointRequester
 }
 
 // NewClient returns a Client for interacting with EVM [chain]
-func NewClient(uri, chain string) Client {
-	return &client{
-		requester: rpc.NewEndpointRequester(fmt.Sprintf("%s/ext/bc/%s/admin", uri, chain)),
+func NewClient(uri, chain string, requestTimeout time.Duration) *Client {
+	return &Client{
+		adminRequester: rpc.NewEndpointRequester(uri, fmt.Sprintf("/ext/bc/%s/admin", chain), "admin", requestTimeout),
 	}
 }
 
 // NewCChainClient returns a Client for interacting with the C Chain
-func NewCChainClient(uri string) Client {
-	// TODO: Update for Subnet-EVM compatibility
-	return NewClient(uri, "C")
+func NewCChainClient(uri string, requestTimeout time.Duration) *Client {
+	return NewClient(uri, "C", requestTimeout)
 }
 
-func (c *client) StartCPUProfiler(ctx context.Context) error {
-	return c.requester.SendRequest(ctx, "admin.startCPUProfiler", struct{}{}, &api.EmptyReply{})
+func (c *Client) StartCPUProfiler() (bool, error) {
+	res := &api.SuccessResponse{}
+	err := c.adminRequester.SendRequest("startCPUProfiler", struct{}{}, res)
+	return res.Success, err
 }
 
-func (c *client) StopCPUProfiler(ctx context.Context) error {
-	return c.requester.SendRequest(ctx, "admin.stopCPUProfiler", struct{}{}, &api.EmptyReply{})
+func (c *Client) StopCPUProfiler() (bool, error) {
+	res := &api.SuccessResponse{}
+	err := c.adminRequester.SendRequest("stopCPUProfiler", struct{}{}, res)
+	return res.Success, err
 }
 
-func (c *client) MemoryProfile(ctx context.Context) error {
-	return c.requester.SendRequest(ctx, "admin.memoryProfile", struct{}{}, &api.EmptyReply{})
+func (c *Client) MemoryProfile() (bool, error) {
+	res := &api.SuccessResponse{}
+	err := c.adminRequester.SendRequest("memoryProfile", struct{}{}, res)
+	return res.Success, err
 }
 
-func (c *client) LockProfile(ctx context.Context) error {
-	return c.requester.SendRequest(ctx, "admin.lockProfile", struct{}{}, &api.EmptyReply{})
+func (c *Client) LockProfile() (bool, error) {
+	res := &api.SuccessResponse{}
+	err := c.adminRequester.SendRequest("lockProfile", struct{}{}, res)
+	return res.Success, err
 }
 
 // SetLogLevel dynamically sets the log level for the C Chain
-func (c *client) SetLogLevel(ctx context.Context, level log.Lvl) error {
-	return c.requester.SendRequest(ctx, "admin.setLogLevel", &SetLogLevelArgs{
+func (c *Client) SetLogLevel(level log.Lvl) (bool, error) {
+	res := &api.SuccessResponse{}
+	err := c.adminRequester.SendRequest("setLogLevel", &SetLogLevelArgs{
 		Level: level.String(),
-	}, &api.EmptyReply{})
-}
-
-// GetVMConfig returns the current config of the VM
-func (c *client) GetVMConfig(ctx context.Context) (*Config, error) {
-	res := &ConfigReply{}
-	err := c.requester.SendRequest(ctx, "admin.getVMConfig", struct{}{}, res)
-	return res.Config, err
+	}, res)
+	return res.Success, err
 }

@@ -33,7 +33,6 @@ import (
 	"time"
 
 	"github.com/lasthyphen/subnet-evm/ethdb"
-	"github.com/lasthyphen/subnet-evm/ethdb/leveldb"
 	"github.com/lasthyphen/subnet-evm/ethdb/memorydb"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
@@ -62,16 +61,6 @@ func NewMemoryDatabase() ethdb.Database {
 // chain segments into cold storage.
 func NewMemoryDatabaseWithCap(size int) ethdb.Database {
 	return NewDatabase(memorydb.NewWithCap(size))
-}
-
-// NewLevelDBDatabase creates a persistent key-value database without a freezer
-// moving immutable chain segments into cold storage.
-func NewLevelDBDatabase(file string, cache int, handles int, namespace string, readonly bool) (ethdb.Database, error) {
-	db, err := leveldb.New(file, cache, handles, namespace, readonly)
-	if err != nil {
-		return nil, err
-	}
-	return NewDatabase(db), nil
 }
 
 type counter uint64
@@ -119,6 +108,7 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 		headers         stat
 		bodies          stat
 		receipts        stat
+		tds             stat
 		numHashPairings stat
 		hashNumPairings stat
 		tries           stat
@@ -129,12 +119,6 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 		preimages       stat
 		bloomBits       stat
 		cliqueSnaps     stat
-
-		// State sync statistics
-		codeToFetch   stat
-		syncProgress  stat
-		syncSegments  stat
-		syncPerformed stat
 
 		// Les statistic
 		chtTrieNodes   stat
@@ -161,6 +145,8 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 			bodies.Add(size)
 		case bytes.HasPrefix(key, blockReceiptsPrefix) && len(key) == (len(blockReceiptsPrefix)+8+common.HashLength):
 			receipts.Add(size)
+		case bytes.HasPrefix(key, headerPrefix) && bytes.HasSuffix(key, headerTDSuffix):
+			tds.Add(size)
 		case bytes.HasPrefix(key, headerPrefix) && bytes.HasSuffix(key, headerHashSuffix):
 			numHashPairings.Add(size)
 		case bytes.HasPrefix(key, headerNumberPrefix) && len(key) == (len(headerNumberPrefix)+common.HashLength):
@@ -179,8 +165,6 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 			preimages.Add(size)
 		case bytes.HasPrefix(key, configPrefix) && len(key) == (len(configPrefix)+common.HashLength):
 			metadata.Add(size)
-		case bytes.HasPrefix(key, upgradeConfigPrefix) && len(key) == (len(upgradeConfigPrefix)+common.HashLength):
-			metadata.Add(size)
 		case bytes.HasPrefix(key, bloomBitsPrefix) && len(key) == (len(bloomBitsPrefix)+10+common.HashLength):
 			bloomBits.Add(size)
 		case bytes.HasPrefix(key, BloomBitsIndexPrefix):
@@ -195,20 +179,13 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 			bytes.HasPrefix(key, []byte("bltIndex-")) ||
 			bytes.HasPrefix(key, []byte("bltRoot-")): // Bloomtrie sub
 			bloomTrieNodes.Add(size)
-		case bytes.HasPrefix(key, syncStorageTriesPrefix) && len(key) == syncStorageTriesKeyLength:
-			syncProgress.Add(size)
-		case bytes.HasPrefix(key, syncSegmentsPrefix) && len(key) == syncSegmentsKeyLength:
-			syncSegments.Add(size)
-		case bytes.HasPrefix(key, CodeToFetchPrefix) && len(key) == codeToFetchKeyLength:
-			codeToFetch.Add(size)
-		case bytes.HasPrefix(key, syncPerformedPrefix) && len(key) == syncPerformedKeyLength:
-			syncPerformed.Add(size)
 		default:
 			var accounted bool
 			for _, meta := range [][]byte{
-				databaseVersionKey, headHeaderKey, headBlockKey,
-				snapshotRootKey, snapshotBlockHashKey, snapshotGeneratorKey,
-				uncleanShutdownKey, syncRootKey, txIndexTailKey,
+				databaseVersionKey, headHeaderKey, headBlockKey, headFastBlockKey, lastPivotKey,
+				fastTrieProgressKey, snapshotDisabledKey, snapshotRootKey, snapshotJournalKey,
+				snapshotGeneratorKey, snapshotRecoveryKey, txIndexTailKey, fastTxLookupLimitKey,
+				uncleanShutdownKey, badBlockKey,
 			} {
 				if bytes.Equal(key, meta) {
 					metadata.Add(size)
@@ -231,6 +208,7 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 		{"Key-Value store", "Headers", headers.Size(), headers.Count()},
 		{"Key-Value store", "Bodies", bodies.Size(), bodies.Count()},
 		{"Key-Value store", "Receipt lists", receipts.Size(), receipts.Count()},
+		{"Key-Value store", "Difficulties", tds.Size(), tds.Count()},
 		{"Key-Value store", "Block number->hash", numHashPairings.Size(), numHashPairings.Count()},
 		{"Key-Value store", "Block hash->number", hashNumPairings.Size(), hashNumPairings.Count()},
 		{"Key-Value store", "Transaction index", txLookups.Size(), txLookups.Count()},
@@ -244,10 +222,6 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 		{"Key-Value store", "Singleton metadata", metadata.Size(), metadata.Count()},
 		{"Light client", "CHT trie nodes", chtTrieNodes.Size(), chtTrieNodes.Count()},
 		{"Light client", "Bloom trie nodes", bloomTrieNodes.Size(), bloomTrieNodes.Count()},
-		{"State sync", "Trie segments", syncSegments.Size(), syncSegments.Count()},
-		{"State sync", "Storage tries to fetch", syncProgress.Size(), syncProgress.Count()},
-		{"State sync", "Code to fetch", codeToFetch.Size(), codeToFetch.Count()},
-		{"State sync", "Block numbers synced to", syncPerformed.Size(), syncPerformed.Count()},
 	}
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Database", "Category", "Size", "Items"})
@@ -260,28 +234,4 @@ func InspectDatabase(db ethdb.Database, keyPrefix, keyStart []byte) error {
 	}
 
 	return nil
-}
-
-// ClearPrefix removes all keys in db that begin with prefix
-func ClearPrefix(db ethdb.KeyValueStore, prefix []byte) error {
-	it := db.NewIterator(prefix, nil)
-	defer it.Release()
-
-	batch := db.NewBatch()
-	for it.Next() {
-		key := common.CopyBytes(it.Key())
-		if err := batch.Delete(key); err != nil {
-			return err
-		}
-		if batch.ValueSize() > ethdb.IdealBatchSize {
-			if err := batch.Write(); err != nil {
-				return err
-			}
-			batch.Reset()
-		}
-	}
-	if err := it.Error(); err != nil {
-		return err
-	}
-	return batch.Write()
 }

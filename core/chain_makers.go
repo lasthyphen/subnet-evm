@@ -30,10 +30,8 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/lasthyphen/subnet-evm/commontype"
 	"github.com/lasthyphen/subnet-evm/consensus"
 	"github.com/lasthyphen/subnet-evm/consensus/dummy"
-	"github.com/lasthyphen/subnet-evm/constants"
 	"github.com/lasthyphen/subnet-evm/core/state"
 	"github.com/lasthyphen/subnet-evm/core/types"
 	"github.com/lasthyphen/subnet-evm/core/vm"
@@ -56,9 +54,8 @@ type BlockGen struct {
 	receipts []*types.Receipt
 	uncles   []*types.Header
 
-	config           *params.ChainConfig
-	engine           consensus.Engine
-	onBlockGenerated func(*types.Block)
+	config *params.ChainConfig
+	engine consensus.Engine
 }
 
 // SetCoinbase sets the coinbase of the generated block.
@@ -196,11 +193,6 @@ func (b *BlockGen) OffsetTime(seconds int64) {
 	b.header.Difficulty = b.engine.CalcDifficulty(chainreader, b.header.Time, b.parent.Header())
 }
 
-// SetOnBlockGenerated sets a callback function to be invoked after each block is generated
-func (b *BlockGen) SetOnBlockGenerated(onBlockGenerated func(*types.Block)) {
-	b.onBlockGenerated = onBlockGenerated
-}
-
 // GenerateChain creates a chain of n blocks. The first block's
 // parent will be the provided parent. db is used to store
 // intermediate states and should contain the parent's state trie.
@@ -235,15 +227,12 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 			}
 
 			// Write state changes to db
-			root, err := statedb.Commit(config.IsEIP158(b.header.Number), false)
+			root, err := statedb.Commit(config.IsEIP158(b.header.Number))
 			if err != nil {
 				panic(fmt.Sprintf("state write error: %v", err))
 			}
 			if err := statedb.Database().TrieDB().Commit(root, false, nil); err != nil {
 				panic(fmt.Sprintf("trie write error: %v", err))
-			}
-			if b.onBlockGenerated != nil {
-				b.onBlockGenerated(block)
 			}
 			return block, b.receipts, nil
 		}
@@ -273,6 +262,14 @@ func makeHeader(chain consensus.ChainReader, config *params.ChainConfig, parent 
 		time = parent.Time() + gap
 	}
 
+	timestamp := new(big.Int).SetUint64(time)
+	var gasLimit uint64
+	if config.IsSubnetEVM(timestamp) {
+		gasLimit = config.GetFeeConfig().GasLimit.Uint64()
+	} else {
+		gasLimit = CalcGasLimit(parent.GasUsed(), parent.GasLimit(), parent.GasLimit(), parent.GasLimit())
+	}
+
 	header := &types.Header{
 		Root:       state.IntermediateRoot(chain.Config().IsEIP158(parent.Number())),
 		ParentHash: parent.Hash(),
@@ -283,24 +280,16 @@ func makeHeader(chain consensus.ChainReader, config *params.ChainConfig, parent 
 			Difficulty: parent.Difficulty(),
 			UncleHash:  parent.UncleHash(),
 		}),
-		Number: new(big.Int).Add(parent.Number(), common.Big1),
-		Time:   time,
+		GasLimit: gasLimit,
+		Number:   new(big.Int).Add(parent.Number(), common.Big1),
+		Time:     time,
 	}
-
-	timestamp := new(big.Int).SetUint64(time)
 	if chain.Config().IsSubnetEVM(timestamp) {
-		feeConfig, _, err := chain.GetFeeConfigAt(parent.Header())
+		var err error
+		header.Extra, header.BaseFee, err = dummy.CalcBaseFee(chain.Config(), parent.Header(), time)
 		if err != nil {
 			panic(err)
 		}
-
-		header.GasLimit = feeConfig.GasLimit.Uint64()
-		header.Extra, header.BaseFee, err = dummy.CalcBaseFee(chain.Config(), feeConfig, parent.Header(), time)
-		if err != nil {
-			panic(err)
-		}
-	} else {
-		header.GasLimit = CalcGasLimit(parent.GasUsed(), parent.GasLimit(), parent.GasLimit(), parent.GasLimit())
 	}
 	return header
 }
@@ -319,10 +308,3 @@ func (cr *fakeChainReader) GetHeaderByNumber(number uint64) *types.Header       
 func (cr *fakeChainReader) GetHeaderByHash(hash common.Hash) *types.Header          { return nil }
 func (cr *fakeChainReader) GetHeader(hash common.Hash, number uint64) *types.Header { return nil }
 func (cr *fakeChainReader) GetBlock(hash common.Hash, number uint64) *types.Block   { return nil }
-func (cr *fakeChainReader) GetFeeConfigAt(parent *types.Header) (commontype.FeeConfig, *big.Int, error) {
-	return cr.config.FeeConfig, nil, nil
-}
-
-func (cr *fakeChainReader) GetCoinbaseAt(parent *types.Header) (common.Address, bool, error) {
-	return constants.BlackholeAddr, cr.config.AllowFeeRecipients, nil
-}

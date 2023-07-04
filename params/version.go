@@ -33,7 +33,7 @@ import (
 const (
 	VersionMajor = 1        // Major version component of the current release
 	VersionMinor = 10       // Minor version component of the current release
-	VersionPatch = 26       // Patch version component of the current release
+	VersionPatch = 12       // Patch version component of the current release
 	VersionMeta  = "stable" // Version metadata to append to the version string
 )
 
@@ -50,11 +50,3 @@ var VersionWithMeta = func() string {
 	}
 	return v
 }()
-
-func VersionWithCommit(gitCommit, gitDate string) string {
-	vsn := VersionWithMeta
-	if len(gitCommit) >= 8 {
-		vsn += "-" + gitCommit[:8]
-	}
-	return vsn
-}

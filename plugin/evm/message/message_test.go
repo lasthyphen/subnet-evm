@@ -4,45 +4,42 @@
 package message
 
 import (
-	"encoding/base64"
 	"testing"
 
-	"github.com/lasthyphen/dijetsnode/utils"
-	"github.com/lasthyphen/dijetsnode/utils/units"
+	"github.com/lasthyphen/dijetalgo/utils"
+	"github.com/lasthyphen/dijetalgo/utils/units"
 
 	"github.com/stretchr/testify/assert"
 )
 
-// TestMarshalTxs asserts that the structure or serialization logic hasn't changed, primarily to
-// ensure compatibility with the network.
-func TestMarshalTxs(t *testing.T) {
+func TestEthTxs(t *testing.T) {
 	assert := assert.New(t)
 
-	base64EthTxGossip := "AAAAAAAAAAAABGJsYWg="
 	msg := []byte("blah")
-	builtMsg := TxsGossip{
+	builtMsg := Txs{
 		Txs: msg,
 	}
-	builtMsgBytes, err := BuildGossipMessage(Codec, builtMsg)
+	builtMsgBytes, err := Build(&builtMsg)
 	assert.NoError(err)
-	assert.Equal(base64EthTxGossip, base64.StdEncoding.EncodeToString(builtMsgBytes))
+	assert.Equal(builtMsgBytes, builtMsg.Bytes())
 
-	parsedMsgIntf, err := ParseGossipMessage(Codec, builtMsgBytes)
+	parsedMsgIntf, err := Parse(builtMsgBytes)
 	assert.NoError(err)
+	assert.Equal(builtMsgBytes, parsedMsgIntf.Bytes())
 
-	parsedMsg, ok := parsedMsgIntf.(TxsGossip)
+	parsedMsg, ok := parsedMsgIntf.(*Txs)
 	assert.True(ok)
 
 	assert.Equal(msg, parsedMsg.Txs)
 }
 
-func TestTxsTooLarge(t *testing.T) {
+func TestEthTxsTooLarge(t *testing.T) {
 	assert := assert.New(t)
 
-	builtMsg := TxsGossip{
+	builtMsg := Txs{
 		Txs: utils.RandomBytes(1024 * units.KiB),
 	}
-	_, err := BuildGossipMessage(Codec, builtMsg)
+	_, err := Build(&builtMsg)
 	assert.Error(err)
 }
 
@@ -50,6 +47,6 @@ func TestParseGibberish(t *testing.T) {
 	assert := assert.New(t)
 
 	randomBytes := utils.RandomBytes(256 * units.KiB)
-	_, err := ParseGossipMessage(Codec, randomBytes)
+	_, err := Parse(randomBytes)
 	assert.Error(err)
 }

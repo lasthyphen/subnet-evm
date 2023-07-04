@@ -6,17 +6,17 @@ package message
 import (
 	"testing"
 
-	"github.com/lasthyphen/dijetsnode/ids"
+	"github.com/lasthyphen/dijetalgo/ids"
 
 	"github.com/stretchr/testify/assert"
 )
 
 type CounterHandler struct {
-	Txs int
+	EthTxs int
 }
 
-func (h *CounterHandler) HandleTxs(ids.NodeID, TxsGossip) error {
-	h.Txs++
+func (h *CounterHandler) HandleTxs(ids.ShortID, uint32, *Txs) error {
+	h.EthTxs++
 	return nil
 }
 
@@ -24,18 +24,18 @@ func TestHandleTxs(t *testing.T) {
 	assert := assert.New(t)
 
 	handler := CounterHandler{}
-	msg := TxsGossip{}
+	msg := Txs{}
 
-	err := msg.Handle(&handler, ids.EmptyNodeID)
+	err := msg.Handle(&handler, ids.ShortEmpty, 0)
 	assert.NoError(err)
-	assert.Equal(1, handler.Txs)
+	assert.Equal(1, handler.EthTxs)
 }
 
 func TestNoopHandler(t *testing.T) {
 	assert := assert.New(t)
 
-	handler := NoopMempoolGossipHandler{}
+	handler := NoopHandler{}
 
-	err := handler.HandleTxs(ids.EmptyNodeID, TxsGossip{})
+	err := handler.HandleTxs(ids.ShortEmpty, 0, nil)
 	assert.NoError(err)
 }

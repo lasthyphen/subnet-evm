@@ -35,7 +35,6 @@ import (
 )
 
 var activators = map[int]func(*JumpTable){
-	3855: enable3855,
 	3198: enable3198,
 	2929: enable2929,
 	2200: enable2200,
@@ -59,6 +58,7 @@ func ValidEip(eipNum int) bool {
 	_, ok := activators[eipNum]
 	return ok
 }
+
 func ActivateableEips() []string {
 	var nums []string
 	for k := range activators {
@@ -173,22 +173,5 @@ func enable3198(jt *JumpTable) {
 func opBaseFee(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
 	baseFee, _ := uint256.FromBig(interpreter.evm.Context.BaseFee)
 	scope.Stack.push(baseFee)
-	return nil, nil
-}
-
-// enable3855 applies EIP-3855 (PUSH0 opcode)
-func enable3855(jt *JumpTable) {
-	// New opcode
-	jt[PUSH0] = &operation{
-		execute:     opPush0,
-		constantGas: GasQuickStep,
-		minStack:    minStack(0, 1),
-		maxStack:    maxStack(0, 1),
-	}
-}
-
-// opPush0 implements the PUSH0 opcode
-func opPush0(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
-	scope.Stack.push(new(uint256.Int))
 	return nil, nil
 }

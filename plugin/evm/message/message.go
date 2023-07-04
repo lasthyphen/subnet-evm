@@ -5,63 +5,70 @@ package message
 
 import (
 	"errors"
-	"fmt"
-
-	"github.com/lasthyphen/dijetsnode/codec"
 
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/lasthyphen/dijetsnode/ids"
-	"github.com/lasthyphen/dijetsnode/utils/units"
+	"github.com/lasthyphen/dijetalgo/ids"
+	"github.com/lasthyphen/dijetalgo/utils/units"
 )
 
 const (
-	// TxMsgSoftCapSize is the ideal size of encoded transaction bytes we send in
-	// any [Txs] message. We do not limit inbound messages to
+	// EthMsgSoftCapSize is the ideal size of encoded transaction bytes we send in
+	// any [EthTxs] message. We do not limit inbound messages to
 	// this size, however. Max inbound message size is enforced by the codec
 	// (512KB).
-	TxMsgSoftCapSize = common.StorageSize(64 * units.KiB)
+	EthMsgSoftCapSize = common.StorageSize(64 * units.KiB)
 )
 
 var (
-	_ GossipMessage = TxsGossip{}
+	_ Message = &Txs{}
 
 	errUnexpectedCodecVersion = errors.New("unexpected codec version")
 )
 
-type GossipMessage interface {
-	// types implementing GossipMessage should also implement fmt.Stringer for logging purposes.
-	fmt.Stringer
+type Message interface {
+	// Handle this message with the correct message handler
+	Handle(handler Handler, nodeID ids.ShortID, requestID uint32) error
 
-	// Handle this gossip message with the gossip handler.
-	Handle(handler GossipHandler, nodeID ids.NodeID) error
+	// initialize should be called whenever a message is built or parsed
+	initialize([]byte)
+
+	// Bytes returns the binary representation of this message
+	//
+	// Bytes should only be called after being initialized
+	Bytes() []byte
 }
 
-type TxsGossip struct {
+type message []byte
+
+func (m *message) initialize(bytes []byte) { *m = bytes }
+func (m *message) Bytes() []byte           { return *m }
+
+type Txs struct {
+	message
+
 	Txs []byte `serialize:"true"`
 }
 
-func (msg TxsGossip) Handle(handler GossipHandler, nodeID ids.NodeID) error {
-	return handler.HandleTxs(nodeID, msg)
+func (msg *Txs) Handle(handler Handler, nodeID ids.ShortID, requestID uint32) error {
+	return handler.HandleTxs(nodeID, requestID, msg)
 }
 
-func (msg TxsGossip) String() string {
-	return fmt.Sprintf("TxsGossip(Len=%d)", len(msg.Txs))
-}
-
-func ParseGossipMessage(codec codec.Manager, bytes []byte) (GossipMessage, error) {
-	var msg GossipMessage
-	version, err := codec.Unmarshal(bytes, &msg)
+func Parse(bytes []byte) (Message, error) {
+	var msg Message
+	version, err := c.Unmarshal(bytes, &msg)
 	if err != nil {
 		return nil, err
 	}
-	if version != Version {
+	if version != codecVersion {
 		return nil, errUnexpectedCodecVersion
 	}
+	msg.initialize(bytes)
 	return msg, nil
 }
 
-func BuildGossipMessage(codec codec.Manager, msg GossipMessage) ([]byte, error) {
-	bytes, err := codec.Marshal(Version, &msg)
+func Build(msg Message) ([]byte, error) {
+	bytes, err := c.Marshal(codecVersion, &msg)
+	msg.initialize(bytes)
 	return bytes, err
 }

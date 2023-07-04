@@ -27,7 +27,6 @@
 package vm
 
 import (
-	"github.com/lasthyphen/subnet-evm/vmerrs"
 	"github.com/holiman/uint256"
 )
 
@@ -57,7 +56,7 @@ func callGas(isEip150 bool, availableGas, base uint64, callCost *uint256.Int) (u
 		}
 	}
 	if !callCost.IsUint64() {
-		return 0, vmerrs.ErrGasUintOverflow
+		return 0, ErrGasUintOverflow
 	}
 
 	return callCost.Uint64(), nil

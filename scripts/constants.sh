@@ -3,42 +3,23 @@
 # Set the PATHS
 GOPATH="$(go env GOPATH)"
 
+VMID="spePNvBxaWSYL2tB5e2xMmMNBQkXMN8z2XEbz1ML2Aahatwoc"
+
+# Set binary location
+binary_path=${SUBNET_EVM_BINARY_PATH:-"$GOPATH/src/github.com/lasthyphen/dijetalgo/build/plugins/$VMID"}
+
 # Avalabs docker hub
-DOCKERHUB_REPO="lasthyphen/dijetsnode"
+dockerhub_repo="avaplatform/avalanchego"
 
-# if this isn't a git repository (say building from a release), don't set our git constants.
-if [ ! -d .git ]
-then
-    CURRENT_BRANCH=""
-    SUBNET_EVM_COMMIT=""
-    SUBNET_EVM_COMMIT_ID=""
-else
-    # Current branch
-    CURRENT_BRANCH=${CURRENT_BRANCH:-$(git describe --tags --exact-match 2> /dev/null || git symbolic-ref -q --short HEAD || git rev-parse --short HEAD || :)}
+# Current branch
+current_branch=${CURRENT_BRANCH:-$(git describe --tags --exact-match 2> /dev/null || git symbolic-ref -q --short HEAD || git rev-parse --short HEAD)}
+echo "Using branch: ${current_branch}"
 
-    # Image build id
-    #
-    # Use an abbreviated version of the full commit to tag the image.
-    # WARNING: this will use the most recent commit even if there are un-committed changes present
-    SUBNET_EVM_COMMIT="$(git --git-dir="$SUBNET_EVM_PATH/.git" rev-parse HEAD || :)"
-    SUBNET_EVM_COMMIT_ID="${SUBNET_EVM_COMMIT::8}"
-fi
+# Image build id
+# Use an abbreviated version of the full commit to tag the image.
 
-echo "Using branch: ${CURRENT_BRANCH}"
+# WARNING: this will use the most recent commit even if there are un-committed changes present
+subnet_evm_commit="$(git --git-dir="$SUBNET_EVM_PATH/.git" rev-parse HEAD)"
+subnet_evm_commit_id="${subnet_evm_commit::8}"
 
-BUILD_IMAGE_ID=${BUILD_IMAGE_ID:-"$DIJETSNODE_VERSION-$SUBNET_EVM_COMMIT_ID"}
-
-# Static compilation
-STATIC_LD_FLAGS=''
-if [ "${STATIC_COMPILATION:-}" = 1 ]
-then
-    export CC=musl-gcc
-    command -v $CC || ( echo $CC must be available for static compilation && exit 1 )
-    STATIC_LD_FLAGS=' -extldflags "-static" -linkmode external '
-fi
-
-# Set the CGO flags to use the portable version of BLST
-#
-# We use "export" here instead of just setting a bash variable because we need
-# to pass this flag to all child processes spawned by the shell.
-export CGO_CFLAGS="-O -D__BLST_PORTABLE__"
+build_image_id=${BUILD_IMAGE_ID:-"$avalanche_version-$subnet_evm_commit_id"}

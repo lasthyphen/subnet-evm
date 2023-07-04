@@ -35,7 +35,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lasthyphen/subnet-evm/metrics"
 	"github.com/ethereum/go-ethereum/log"
 	"golang.org/x/time/rate"
 )
@@ -84,8 +83,6 @@ type handler struct {
 type callProc struct {
 	ctx       context.Context
 	notifiers []*Notifier
-	callStart time.Time
-	procStart time.Time
 }
 
 func newHandler(connCtx context.Context, conn jsonWriter, idgen func() ID, reg *serviceRegistry) *handler {
@@ -265,15 +262,15 @@ func (h *handler) awaitLimit(ctx context.Context) {
 	timer.Stop()
 }
 
-// consumeLimit removes the time since [procStart] from the rate limiter. It is
+// consumeLimit removes the time since [startTime] from the rate limiter. It is
 // assumed that the rate limiter is full.
-func (h *handler) consumeLimit(procStart time.Time) {
+func (h *handler) consumeLimit(startTime time.Time) {
 	if h.limiter == nil {
 		return
 	}
 
 	stopTime := time.Now()
-	processingTime := stopTime.Sub(procStart)
+	processingTime := stopTime.Sub(startTime)
 	if processingTime > h.deadlineContext {
 		processingTime = h.deadlineContext
 	}
@@ -296,17 +293,11 @@ func (h *handler) startCallProc(fn func(*callProc)) {
 		}
 		defer h.callWG.Done()
 
-		// Capture the time before we await for processing
-		callStart := time.Now()
 		h.awaitLimit(ctx)
-
-		// If we are not limiting CPU, [procStart] will be identical to
-		// [callStart]
-		procStart := time.Now()
+		startTime := time.Now()
 		defer cancel()
-
-		fn(&callProc{ctx: ctx, callStart: callStart, procStart: procStart})
-		h.consumeLimit(procStart)
+		fn(&callProc{ctx: ctx})
+		h.consumeLimit(startTime)
 	}
 	if h.limiter == nil {
 		go callFn()
@@ -318,7 +309,7 @@ func (h *handler) startCallProc(fn func(*callProc)) {
 // handleImmediate executes non-call messages. It returns false if the message is a
 // call or requires a reply.
 func (h *handler) handleImmediate(msg *jsonrpcMessage) bool {
-	execStart := time.Now()
+	start := time.Now()
 	switch {
 	case msg.isNotification():
 		if strings.HasSuffix(msg.Method, notificationMethodSuffix) {
@@ -328,7 +319,7 @@ func (h *handler) handleImmediate(msg *jsonrpcMessage) bool {
 		return false
 	case msg.isResponse():
 		h.handleResponse(msg)
-		h.log.Trace("Handled RPC response", "reqid", idForLog{msg.ID}, "duration", time.Since(execStart))
+		h.log.Trace("Handled RPC response", "reqid", idForLog{msg.ID}, "t", time.Since(start))
 		return true
 	default:
 		return false
@@ -376,26 +367,16 @@ func (h *handler) handleResponse(msg *jsonrpcMessage) {
 
 // handleCallMsg executes a call message and returns the answer.
 func (h *handler) handleCallMsg(ctx *callProc, msg *jsonrpcMessage) *jsonrpcMessage {
-	// [callStart] is the time the message was enqueued for handler processing
-	callStart := ctx.callStart
-	// [procStart] is the time the message cleared the [limiter] and began to be
-	// processed by the handler
-	procStart := ctx.procStart
-	// [execStart] is the time the message began to be executed by the handler
-	//
-	// Note: This can be different than the executionStart in [startCallProc] as
-	// the goroutine that handles execution may not be executed right away.
-	execStart := time.Now()
-
+	start := time.Now()
 	switch {
 	case msg.isNotification():
 		h.handleCall(ctx, msg)
-		h.log.Debug("Served "+msg.Method, "execTime", time.Since(execStart), "procTime", time.Since(procStart), "totalTime", time.Since(callStart))
+		h.log.Debug("Served "+msg.Method, "t", time.Since(start))
 		return nil
 	case msg.isCall():
 		resp := h.handleCall(ctx, msg)
 		var ctx []interface{}
-		ctx = append(ctx, "reqid", idForLog{msg.ID}, "execTime", time.Since(execStart), "procTime", time.Since(procStart), "totalTime", time.Since(callStart))
+		ctx = append(ctx, "reqid", idForLog{msg.ID}, "t", time.Since(start))
 		if resp.Error != nil {
 			ctx = append(ctx, "err", resp.Error.Message)
 			if resp.Error.Data != nil {
@@ -439,14 +420,12 @@ func (h *handler) handleCall(cp *callProc, msg *jsonrpcMessage) *jsonrpcMessage 
 	if callb != h.unsubscribeCb {
 		rpcRequestGauge.Inc(1)
 		if answer.Error != nil {
-			failedRequestGauge.Inc(1)
+			failedReqeustGauge.Inc(1)
 		} else {
 			successfulRequestGauge.Inc(1)
 		}
 		rpcServingTimer.UpdateSince(start)
-		if metrics.EnabledExpensive {
-			updateServeTimeHistogram(msg.Method, answer.Error == nil, time.Since(start))
-		}
+		newRPCServingTimer(msg.Method, answer.Error == nil).UpdateSince(start)
 	}
 	return answer
 }

@@ -74,9 +74,7 @@ func setDefaults(cfg *Config) {
 			PetersburgBlock:     new(big.Int),
 			IstanbulBlock:       new(big.Int),
 			MuirGlacierBlock:    new(big.Int),
-			NetworkUpgrades: params.NetworkUpgrades{
-				SubnetEVMTimestamp: new(big.Int),
-			},
+			SubnetEVMTimestamp:  new(big.Int),
 		}
 	}
 

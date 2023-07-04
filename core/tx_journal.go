@@ -29,7 +29,6 @@ package core
 import (
 	"errors"
 	"io"
-	"io/fs"
 	"os"
 
 	"github.com/lasthyphen/subnet-evm/core/types"
@@ -68,12 +67,12 @@ func newTxJournal(path string) *txJournal {
 // load parses a transaction journal dump from disk, loading its contents into
 // the specified pool.
 func (journal *txJournal) load(add func([]*types.Transaction) []error) error {
-	// Open the journal for loading any past transactions
-	input, err := os.Open(journal.path)
-	if errors.Is(err, fs.ErrNotExist) {
-		// Skip the parsing if the journal file doesn't exist at all
+	// Skip the parsing if the journal file doesn't exist at all
+	if _, err := os.Stat(journal.path); os.IsNotExist(err) {
 		return nil
 	}
+	// Open the journal for loading any past transactions
+	input, err := os.Open(journal.path)
 	if err != nil {
 		return err
 	}

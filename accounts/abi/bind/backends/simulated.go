@@ -35,7 +35,6 @@ import (
 	"time"
 
 	"github.com/lasthyphen/subnet-evm/eth"
-	"github.com/lasthyphen/subnet-evm/vmerrs"
 
 	"github.com/lasthyphen/subnet-evm/accounts/abi"
 	"github.com/lasthyphen/subnet-evm/accounts/abi/bind"
@@ -97,8 +96,7 @@ type SimulatedBackend struct {
 	acceptedBlock *types.Block   // Currently accepted block that will be imported on request
 	acceptedState *state.StateDB // Currently accepted state that will be the active on request
 
-	events       *filters.EventSystem  // for filtering log events live
-	filterSystem *filters.FilterSystem // for filtering database logs
+	events *filters.EventSystem // Event system for filtering log events live
 
 	config *params.ChainConfig
 }
@@ -112,18 +110,14 @@ func NewSimulatedBackendWithDatabase(database ethdb.Database, alloc core.Genesis
 	genesis := core.Genesis{Config: cpcfg, GasLimit: gasLimit, Alloc: alloc}
 	genesis.MustCommit(database)
 	cacheConfig := &core.CacheConfig{}
-	blockchain, _ := core.NewBlockChain(database, cacheConfig, genesis.Config, dummy.NewCoinbaseFaker(), vm.Config{}, common.Hash{})
+	blockchain, _ := core.NewBlockChain(database, cacheConfig, genesis.Config, dummy.NewEngine(), vm.Config{}, common.Hash{})
 
 	backend := &SimulatedBackend{
 		database:   database,
 		blockchain: blockchain,
 		config:     genesis.Config,
+		events:     filters.NewEventSystem(&filterBackend{database, blockchain}, false),
 	}
-
-	filterBackend := &filterBackend{database, blockchain, backend}
-	backend.filterSystem = filters.NewFilterSystem(filterBackend, filters.Config{})
-	backend.events = filters.NewEventSystem(backend.filterSystem, false)
-
 	backend.rollback(blockchain.CurrentBlock())
 	return backend
 }
@@ -143,7 +137,7 @@ func (b *SimulatedBackend) Close() error {
 
 // Commit imports all the pending transactions as a single block and starts a
 // fresh new state.
-func (b *SimulatedBackend) Commit(accept bool) common.Hash {
+func (b *SimulatedBackend) Commit(accept bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -154,15 +148,10 @@ func (b *SimulatedBackend) Commit(accept bool) common.Hash {
 		if err := b.blockchain.Accept(b.acceptedBlock); err != nil {
 			panic(err)
 		}
-		b.blockchain.DrainAcceptorQueue()
 	}
-	blockHash := b.acceptedBlock.Hash()
-
 	// Using the last inserted block here makes it possible to build on a side
 	// chain after a fork.
 	b.rollback(b.acceptedBlock)
-
-	return blockHash
 }
 
 // Rollback aborts all pending transactions, reverting to the last committed state.
@@ -174,7 +163,7 @@ func (b *SimulatedBackend) Rollback() {
 }
 
 func (b *SimulatedBackend) rollback(parent *types.Block) {
-	blocks, _, _ := core.GenerateChain(b.config, parent, dummy.NewFaker(), b.database, 1, 10, func(int, *core.BlockGen) {})
+	blocks, _, _ := core.GenerateChain(b.config, parent, dummy.NewEngine(), b.database, 1, 10, func(int, *core.BlockGen) {})
 
 	b.acceptedBlock = blocks[0]
 	b.acceptedState, _ = state.New(b.acceptedBlock.Root(), b.blockchain.StateCache(), nil)
@@ -278,9 +267,6 @@ func (b *SimulatedBackend) TransactionReceipt(ctx context.Context, txHash common
 	defer b.mu.Unlock()
 
 	receipt, _, _, _ := rawdb.ReadReceipt(b.database, txHash, b.config)
-	if receipt == nil {
-		return nil, interfaces.NotFound
-	}
 	return receipt, nil
 }
 
@@ -513,9 +499,6 @@ func (b *SimulatedBackend) AcceptedNonceAt(ctx context.Context, account common.A
 // SuggestGasPrice implements ContractTransactor.SuggestGasPrice. Since the simulated
 // chain doesn't have miners, we just return a gas price of 1 for any call.
 func (b *SimulatedBackend) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	if b.acceptedBlock.Header().BaseFee != nil {
 		return b.acceptedBlock.Header().BaseFee, nil
 	}
@@ -599,7 +582,6 @@ func (b *SimulatedBackend) EstimateGas(ctx context.Context, call interfaces.Call
 	for lo+1 < hi {
 		mid := (hi + lo) / 2
 		failed, _, err := executable(mid)
-
 		// If the error is not nil(consensus error), it means the provided message
 		// call or transaction will never be accepted no matter how much gas it is
 		// assigned. Return the error directly, don't struggle any more
@@ -619,7 +601,7 @@ func (b *SimulatedBackend) EstimateGas(ctx context.Context, call interfaces.Call
 			return 0, err
 		}
 		if failed {
-			if result != nil && result.Err != vmerrs.ErrOutOfGas {
+			if result != nil && result.Err != vm.ErrOutOfGas {
 				if len(result.Revert()) > 0 {
 					return 0, newRevertError(result)
 				}
@@ -652,7 +634,7 @@ func (b *SimulatedBackend) callContract(ctx context.Context, call interfaces.Cal
 			// User specified the legacy gas field, convert to 1559 gas typing
 			call.GasFeeCap, call.GasTipCap = call.GasPrice, call.GasPrice
 		} else {
-			// User specified 1559 gas fields (or none), use those
+			// User specified 1559 gas feilds (or none), use those
 			if call.GasFeeCap == nil {
 				call.GasFeeCap = new(big.Int)
 			}
@@ -690,6 +672,7 @@ func (b *SimulatedBackend) callContract(ctx context.Context, call interfaces.Cal
 }
 
 // SendTransaction updates the pending block to include the given transaction.
+// It panics if the transaction is invalid.
 func (b *SimulatedBackend) SendTransaction(ctx context.Context, tx *types.Transaction) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -697,17 +680,17 @@ func (b *SimulatedBackend) SendTransaction(ctx context.Context, tx *types.Transa
 	// Get the last block
 	block, err := b.blockByHash(ctx, b.acceptedBlock.ParentHash())
 	if err != nil {
-		return errors.New("could not fetch parent")
+		panic("could not fetch parent")
 	}
 	// Check transaction validity
 	signer := types.NewLondonSigner(b.blockchain.Config().ChainID)
 	sender, err := types.Sender(signer, tx)
 	if err != nil {
-		return fmt.Errorf("invalid transaction: %v", err)
+		panic(fmt.Errorf("invalid transaction: %v", err))
 	}
 	nonce := b.acceptedState.GetNonce(sender)
 	if tx.Nonce() != nonce {
-		return fmt.Errorf("invalid transaction nonce: got %d, want %d", tx.Nonce(), nonce)
+		panic(fmt.Errorf("invalid transaction nonce: got %d, want %d", tx.Nonce(), nonce))
 	}
 	// Include tx in chain
 	blocks, _, err := core.GenerateChain(b.config, block, dummy.NewETHFaker(), b.database, 1, 10, func(number int, block *core.BlockGen) {
@@ -734,7 +717,7 @@ func (b *SimulatedBackend) FilterLogs(ctx context.Context, query interfaces.Filt
 	var filter *filters.Filter
 	if query.BlockHash != nil {
 		// Block filter requested, construct a single-shot filter
-		filter = b.filterSystem.NewBlockFilter(*query.BlockHash, query.Addresses, query.Topics)
+		filter = filters.NewBlockFilter(&filterBackend{b.database, b.blockchain}, *query.BlockHash, query.Addresses, query.Topics)
 	} else {
 		// Initialize unset filter boundaries to run from genesis to chain head
 		from := int64(0)
@@ -746,7 +729,7 @@ func (b *SimulatedBackend) FilterLogs(ctx context.Context, query interfaces.Filt
 			to = query.ToBlock.Int64()
 		}
 		// Construct the range filter
-		filter, _ = b.filterSystem.NewRangeFilter(from, to, query.Addresses, query.Topics)
+		filter, _ = filters.NewRangeFilter(&filterBackend{b.database, b.blockchain}, from, to, query.Addresses, query.Topics)
 	}
 	// Run the filter and return all the logs
 	logs, err := filter.Logs(ctx)
@@ -831,7 +814,7 @@ func (b *SimulatedBackend) AdjustTime(adjustment time.Duration) error {
 		return errors.New("Could not adjust time on non-empty block")
 	}
 
-	blocks, _, _ := core.GenerateChain(b.config, b.blockchain.CurrentBlock(), dummy.NewFaker(), b.database, 1, 10, func(number int, block *core.BlockGen) {
+	blocks, _, _ := core.GenerateChain(b.config, b.blockchain.CurrentBlock(), dummy.NewEngine(), b.database, 1, 10, func(number int, block *core.BlockGen) {
 		block.OffsetTime(int64(adjustment.Seconds()))
 	})
 	stateDB, _ := b.blockchain.State()
@@ -867,9 +850,8 @@ func (m callMsg) AccessList() types.AccessList { return m.CallMsg.AccessList }
 // filterBackend implements filters.Backend to support filtering for logs without
 // taking bloom-bits acceleration structures into account.
 type filterBackend struct {
-	db      ethdb.Database
-	bc      *core.BlockChain
-	backend *SimulatedBackend
+	db ethdb.Database
+	bc *core.BlockChain
 }
 
 func (fb *filterBackend) SubscribeChainAcceptedEvent(ch chan<- core.ChainEvent) event.Subscription {
@@ -896,8 +878,7 @@ func (fb *filterBackend) GetMaxBlocksPerRequest() int64 {
 	return eth.DefaultSettings.MaxBlocksPerRequest
 }
 
-func (fb *filterBackend) ChainDb() ethdb.Database { return fb.db }
-
+func (fb *filterBackend) ChainDb() ethdb.Database  { return fb.db }
 func (fb *filterBackend) EventMux() *event.TypeMux { panic("not supported") }
 
 func (fb *filterBackend) HeaderByNumber(ctx context.Context, block rpc.BlockNumber) (*types.Header, error) {
@@ -919,8 +900,19 @@ func (fb *filterBackend) GetReceipts(ctx context.Context, hash common.Hash) (typ
 	return rawdb.ReadReceipts(fb.db, hash, *number, fb.bc.Config()), nil
 }
 
-func (fb *filterBackend) GetLogs(ctx context.Context, hash common.Hash, number uint64) ([][]*types.Log, error) {
-	logs := rawdb.ReadLogs(fb.db, hash, number)
+func (fb *filterBackend) GetLogs(ctx context.Context, hash common.Hash) ([][]*types.Log, error) {
+	number := rawdb.ReadHeaderNumber(fb.db, hash)
+	if number == nil {
+		return nil, nil
+	}
+	receipts := rawdb.ReadReceipts(fb.db, hash, *number, fb.bc.Config())
+	if receipts == nil {
+		return nil, nil
+	}
+	logs := make([][]*types.Log, len(receipts))
+	for i, receipt := range receipts {
+		logs[i] = receipt.Logs
+	}
 	return logs, nil
 }
 

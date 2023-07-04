@@ -8,8 +8,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/lasthyphen/dijetsnode/utils/wrappers"
-	"github.com/lasthyphen/subnet-evm/commontype"
+	"github.com/lasthyphen/dijetalgo/utils/wrappers"
 	"github.com/lasthyphen/subnet-evm/core/types"
 	"github.com/lasthyphen/subnet-evm/params"
 	"github.com/ethereum/go-ethereum/common"
@@ -19,7 +18,7 @@ import (
 // CalcBaseFee takes the previous header and the timestamp of its child block
 // and calculates the expected base fee as well as the encoding of the past
 // pricing information for the child block.
-func CalcBaseFee(config *params.ChainConfig, feeConfig commontype.FeeConfig, parent *types.Header, timestamp uint64) ([]byte, *big.Int, error) {
+func CalcBaseFee(config *params.ChainConfig, parent *types.Header, timestamp uint64) ([]byte, *big.Int, error) {
 	// If the current block is the first EIP-1559 block, or it is the genesis block
 	// return the initial slice and initial base fee.
 	isSubnetEVM := config.IsSubnetEVM(new(big.Int).SetUint64(parent.Time))
@@ -27,7 +26,8 @@ func CalcBaseFee(config *params.ChainConfig, feeConfig commontype.FeeConfig, par
 
 	if !isSubnetEVM || parent.Number.Cmp(common.Big0) == 0 {
 		initialSlice := make([]byte, extraDataSize)
-		return initialSlice, feeConfig.MinBaseFee, nil
+		minBaseFee := config.GetFeeConfig().MinBaseFee
+		return initialSlice, minBaseFee, nil
 	}
 	if len(parent.Extra) != extraDataSize {
 		return nil, nil, fmt.Errorf("expected length of parent extra data to be %d, but found %d", extraDataSize, len(parent.Extra))
@@ -47,9 +47,9 @@ func CalcBaseFee(config *params.ChainConfig, feeConfig commontype.FeeConfig, par
 
 	// start off with parent's base fee
 	baseFee := new(big.Int).Set(parent.BaseFee)
-	baseFeeChangeDenominator := feeConfig.BaseFeeChangeDenominator
+	baseFeeChangeDenominator := config.GetFeeConfig().BaseFeeChangeDenominator
 
-	parentGasTargetBig := feeConfig.TargetGas
+	parentGasTargetBig := config.GetFeeConfig().TargetGas
 	parentGasTarget := parentGasTargetBig.Uint64()
 
 	// Add in the gas used by the parent block in the correct place
@@ -79,6 +79,7 @@ func CalcBaseFee(config *params.ChainConfig, feeConfig commontype.FeeConfig, par
 			common.Big1,
 		)
 
+		// Gas price is increasing, so ensure it does not increase past the maximum
 		baseFee.Add(baseFee, baseFeeDelta)
 	} else {
 		// Otherwise if the parent block used less gas than its target, the baseFee should decrease.
@@ -101,21 +102,10 @@ func CalcBaseFee(config *params.ChainConfig, feeConfig commontype.FeeConfig, par
 		baseFee.Sub(baseFee, baseFeeDelta)
 	}
 
-	baseFee = selectBigWithinBounds(feeConfig.MinBaseFee, baseFee, nil)
+	expectedMinBaseFee := config.GetFeeConfig().MinBaseFee
+	baseFee = selectBigWithinBounds(expectedMinBaseFee, baseFee, nil)
 
 	return newRollupWindow, baseFee, nil
-}
-
-// EstiamteNextBaseFee attempts to estimate the next base fee based on a block with [parent] being built at
-// [timestamp].
-// If [timestamp] is less than the timestamp of [parent], then it uses the same timestamp as parent.
-// Warning: This function should only be used in estimation and should not be used when calculating the canonical
-// base fee for a subsequent block.
-func EstimateNextBaseFee(config *params.ChainConfig, feeConfig commontype.FeeConfig, parent *types.Header, timestamp uint64) ([]byte, *big.Int, error) {
-	if timestamp < parent.Time {
-		timestamp = parent.Time
-	}
-	return CalcBaseFee(config, feeConfig, parent, timestamp)
 }
 
 // selectBigWithinBounds returns [value] if it is within the bounds:

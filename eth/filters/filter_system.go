@@ -35,84 +35,14 @@ import (
 	"time"
 
 	"github.com/lasthyphen/subnet-evm/core"
-	"github.com/lasthyphen/subnet-evm/core/bloombits"
 	"github.com/lasthyphen/subnet-evm/core/rawdb"
 	"github.com/lasthyphen/subnet-evm/core/types"
-	"github.com/lasthyphen/subnet-evm/core/vm"
-	"github.com/lasthyphen/subnet-evm/ethdb"
 	"github.com/lasthyphen/subnet-evm/interfaces"
 	"github.com/lasthyphen/subnet-evm/rpc"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 )
-
-// Config represents the configuration of the filter system.
-type Config struct {
-	Timeout time.Duration // how long filters stay active (default: 5min)
-}
-
-func (cfg Config) withDefaults() Config {
-	if cfg.Timeout == 0 {
-		cfg.Timeout = 5 * time.Minute
-	}
-	return cfg
-}
-
-type Backend interface {
-	ChainDb() ethdb.Database
-	HeaderByNumber(ctx context.Context, blockNr rpc.BlockNumber) (*types.Header, error)
-	HeaderByHash(ctx context.Context, blockHash common.Hash) (*types.Header, error)
-	GetReceipts(ctx context.Context, blockHash common.Hash) (types.Receipts, error)
-	GetLogs(ctx context.Context, blockHash common.Hash, number uint64) ([][]*types.Log, error)
-
-	SubscribeNewTxsEvent(chan<- core.NewTxsEvent) event.Subscription
-	SubscribeChainEvent(ch chan<- core.ChainEvent) event.Subscription
-	SubscribeChainAcceptedEvent(ch chan<- core.ChainEvent) event.Subscription
-	SubscribeRemovedLogsEvent(ch chan<- core.RemovedLogsEvent) event.Subscription
-	SubscribeLogsEvent(ch chan<- []*types.Log) event.Subscription
-	SubscribeAcceptedLogsEvent(ch chan<- []*types.Log) event.Subscription
-
-	SubscribePendingLogsEvent(ch chan<- []*types.Log) event.Subscription
-
-	SubscribeAcceptedTransactionEvent(ch chan<- core.NewTxsEvent) event.Subscription
-
-	BloomStatus() (uint64, uint64)
-	ServiceFilter(ctx context.Context, session *bloombits.MatcherSession)
-
-	// Added to the backend interface to support limiting of logs requests
-	GetVMConfig() *vm.Config
-	LastAcceptedBlock() *types.Block
-	GetMaxBlocksPerRequest() int64
-}
-
-// FilterSystem holds resources shared by all filters.
-type FilterSystem struct {
-	backend Backend
-	cfg     *Config
-}
-
-// NewFilterSystem creates a filter system.
-func NewFilterSystem(backend Backend, config Config) *FilterSystem {
-	config = config.withDefaults()
-	return &FilterSystem{
-		backend: backend,
-		cfg:     &config,
-	}
-}
-
-// getLogs loads block logs from the backend. The backend is responsible for
-// performing any log caching.
-func (sys *FilterSystem) getLogs(ctx context.Context, blockHash common.Hash, number uint64) ([][]*types.Log, error) {
-	logs, err := sys.backend.GetLogs(ctx, blockHash, number)
-	if err != nil {
-		return nil, err
-	}
-	if logs == nil {
-		return nil, fmt.Errorf("failed to get logs for block #%d (0x%s)", number, blockHash.TerminalString())
-	}
-	return logs, nil
-}
 
 // Type determines the kind of filter and is used to put the filter in to
 // the correct bucket when added.
@@ -170,7 +100,6 @@ type subscription struct {
 // subscription which match the subscription criteria.
 type EventSystem struct {
 	backend   Backend
-	sys       *FilterSystem
 	lightMode bool
 	lastHead  *types.Header
 
@@ -203,10 +132,9 @@ type EventSystem struct {
 //
 // The returned manager has a loop that needs to be stopped with the Stop function
 // or by stopping the given mux.
-func NewEventSystem(sys *FilterSystem, lightMode bool) *EventSystem {
+func NewEventSystem(backend Backend, lightMode bool) *EventSystem {
 	m := &EventSystem{
-		sys:             sys,
-		backend:         sys.backend,
+		backend:         backend,
 		lightMode:       lightMode,
 		install:         make(chan *subscription),
 		uninstall:       make(chan *subscription),
@@ -397,7 +325,7 @@ func (es *EventSystem) subscribeLogs(crit interfaces.FilterQuery, logs chan []*t
 	return es.subscribe(sub)
 }
 
-// subscribePendingLogs creates a subscription that writes contract event logs for
+// subscribePendingLogs creates a subscription that writes transaction hashes for
 // transactions that enter the transaction pool.
 func (es *EventSystem) subscribePendingLogs(crit interfaces.FilterQuery, logs chan []*types.Log) *Subscription {
 	sub := &subscription{
@@ -609,7 +537,7 @@ func (es *EventSystem) lightFilterLogs(header *types.Header, addresses []common.
 		// Get the logs of the block
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 		defer cancel()
-		logsList, err := es.sys.getLogs(ctx, header.Hash(), header.Number.Uint64())
+		logsList, err := es.backend.GetLogs(ctx, header.Hash())
 		if err != nil {
 			return nil
 		}

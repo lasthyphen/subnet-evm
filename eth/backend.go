@@ -30,18 +30,16 @@ package eth
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/lasthyphen/dijetsnode/utils/timer/mockable"
+	"github.com/lasthyphen/dijetalgo/utils/timer/mockable"
 	"github.com/lasthyphen/subnet-evm/accounts"
 	"github.com/lasthyphen/subnet-evm/consensus"
 	"github.com/lasthyphen/subnet-evm/consensus/dummy"
 	"github.com/lasthyphen/subnet-evm/core"
 	"github.com/lasthyphen/subnet-evm/core/bloombits"
 	"github.com/lasthyphen/subnet-evm/core/rawdb"
-	"github.com/lasthyphen/subnet-evm/core/state/pruner"
 	"github.com/lasthyphen/subnet-evm/core/types"
 	"github.com/lasthyphen/subnet-evm/core/vm"
 	"github.com/lasthyphen/subnet-evm/eth/ethconfig"
@@ -50,7 +48,6 @@ import (
 	"github.com/lasthyphen/subnet-evm/eth/tracers"
 	"github.com/lasthyphen/subnet-evm/ethdb"
 	"github.com/lasthyphen/subnet-evm/internal/ethapi"
-	"github.com/lasthyphen/subnet-evm/internal/shutdowncheck"
 	"github.com/lasthyphen/subnet-evm/miner"
 	"github.com/lasthyphen/subnet-evm/node"
 	"github.com/lasthyphen/subnet-evm/params"
@@ -95,28 +92,16 @@ type Ethereum struct {
 	etherbase common.Address
 
 	networkID     uint64
-	netRPCService *ethapi.NetAPI
+	netRPCService *ethapi.PublicNetAPI
 
 	lock sync.RWMutex // Protects the variadic fields (e.g. gas price and etherbase)
-
-	shutdownTracker *shutdowncheck.ShutdownTracker // Tracks if and when the node has shutdown ungracefully
-
-	stackRPCs []rpc.API
 
 	settings Settings // Settings for Ethereum API
 }
 
-// roundUpCacheSize returns [input] rounded up to the next multiple of [allocSize]
-func roundUpCacheSize(input int, allocSize int) int {
-	cacheChunks := (input + allocSize - 1) / allocSize
-	return cacheChunks * allocSize
-}
-
 // New creates a new Ethereum object (including the
 // initialisation of the common Ethereum object)
-func New(
-	stack *node.Node,
-	config *Config,
+func New(stack *node.Node, config *Config,
 	chainDb ethdb.Database,
 	settings Settings,
 	lastAcceptedHash common.Hash,
@@ -125,55 +110,38 @@ func New(
 	if chainDb == nil {
 		return nil, errors.New("chainDb cannot be nil")
 	}
+	if !config.Pruning && config.TrieDirtyCache > 0 {
+		// If snapshots are enabled, allocate 2/5 of the TrieDirtyCache memory cap to the snapshot cache
+		if config.SnapshotCache > 0 {
+			config.TrieCleanCache += config.TrieDirtyCache * 3 / 5
+			config.SnapshotCache += config.TrieDirtyCache * 2 / 5
+		} else {
+			// If snapshots are disabled, the TrieDirtyCache will be written through to the clean cache
+			// so move the cache allocation from the dirty cache to the clean cache
+			config.TrieCleanCache += config.TrieDirtyCache
+			config.TrieDirtyCache = 0
+		}
+	}
+	log.Info("Allocated trie memory caches", "clean", common.StorageSize(config.TrieCleanCache)*1024*1024, "dirty", common.StorageSize(config.TrieDirtyCache)*1024*1024)
 
-	// round TrieCleanCache and SnapshotCache up to nearest 64MB, since fastcache will mmap
-	// memory in 64MBs chunks.
-	config.TrieCleanCache = roundUpCacheSize(config.TrieCleanCache, 64)
-	config.SnapshotCache = roundUpCacheSize(config.SnapshotCache, 64)
-
-	log.Info(
-		"Allocated memory caches",
-		"trie clean", common.StorageSize(config.TrieCleanCache)*1024*1024,
-		"trie dirty", common.StorageSize(config.TrieDirtyCache)*1024*1024,
-		"snapshot clean", common.StorageSize(config.SnapshotCache)*1024*1024,
-	)
-
-	chainConfig, genesisErr := core.SetupGenesisBlock(chainDb, config.Genesis, lastAcceptedHash, config.SkipUpgradeCheck)
+	chainConfig, genesisErr := core.SetupGenesisBlock(chainDb, config.Genesis)
 	if genesisErr != nil {
 		return nil, genesisErr
 	}
-	log.Info("")
-	log.Info(strings.Repeat("-", 153))
-	for _, line := range strings.Split(chainConfig.String(), "\n") {
-		log.Info(line)
-	}
-	log.Info(strings.Repeat("-", 153))
-	log.Info("")
-	// Free airdrop data to save memory usage
-	config.Genesis.AirdropData = nil
+	log.Info("Initialised chain configuration", "config", chainConfig)
 
-	// Note: RecoverPruning must be called to handle the case that we are midway through offline pruning.
-	// If the data directory is changed in between runs preventing RecoverPruning from performing its job correctly,
-	// it may cause DB corruption.
-	// Since RecoverPruning will only continue a pruning run that already began, we do not need to ensure that
-	// reprocessState has already been called and completed successfully. To ensure this, we must maintain
-	// that Prune is only run after reprocessState has finished successfully.
-	if err := pruner.RecoverPruning(config.OfflinePruningDataDirectory, chainDb); err != nil {
-		log.Error("Failed to recover state", "error", err)
-	}
 	eth := &Ethereum{
 		config:            config,
 		chainDb:           chainDb,
-		eventMux:          new(event.TypeMux),
+		eventMux:          stack.EventMux(),
 		accountManager:    stack.AccountManager(),
-		engine:            dummy.NewFakerWithClock(clock),
+		engine:            dummy.NewEngine(),
 		closeBloomHandler: make(chan struct{}),
 		networkID:         config.NetworkId,
 		etherbase:         config.Miner.Etherbase,
 		bloomRequests:     make(chan chan *bloombits.Retrieval),
 		bloomIndexer:      core.NewBloomIndexer(chainDb, params.BloomBitsBlocks, params.BloomConfirms),
 		settings:          settings,
-		shutdownTracker:   shutdowncheck.NewShutdownTracker(chainDb),
 	}
 
 	bcVersion := rawdb.ReadDatabaseVersion(chainDb)
@@ -197,76 +165,51 @@ func New(
 			AllowUnfinalizedQueries: config.AllowUnfinalizedQueries,
 		}
 		cacheConfig = &core.CacheConfig{
-			TrieCleanLimit:                  config.TrieCleanCache,
-			TrieCleanJournal:                config.TrieCleanJournal,
-			TrieCleanRejournal:              config.TrieCleanRejournal,
-			TrieDirtyLimit:                  config.TrieDirtyCache,
-			TrieDirtyCommitTarget:           config.TrieDirtyCommitTarget,
-			Pruning:                         config.Pruning,
-			AcceptorQueueLimit:              config.AcceptorQueueLimit,
-			CommitInterval:                  config.CommitInterval,
-			PopulateMissingTries:            config.PopulateMissingTries,
-			PopulateMissingTriesParallelism: config.PopulateMissingTriesParallelism,
-			AllowMissingTries:               config.AllowMissingTries,
-			SnapshotDelayInit:               config.SnapshotDelayInit,
-			SnapshotLimit:                   config.SnapshotCache,
-			SnapshotAsync:                   config.SnapshotAsync,
-			SnapshotVerify:                  config.SnapshotVerify,
-			SkipSnapshotRebuild:             config.SkipSnapshotRebuild,
-			Preimages:                       config.Preimages,
-			AcceptedCacheSize:               config.AcceptedCacheSize,
-			TxLookupLimit:                   config.TxLookupLimit,
+			TrieCleanLimit: config.TrieCleanCache,
+			TrieDirtyLimit: config.TrieDirtyCache,
+			Pruning:        config.Pruning,
+			SnapshotLimit:  config.SnapshotCache,
+			SnapshotAsync:  config.SnapshotAsync,
+			SnapshotVerify: config.SnapshotVerify,
+			Preimages:      config.Preimages,
 		}
 	)
-
-	if err := eth.precheckPopulateMissingTries(); err != nil {
-		return nil, err
-	}
-
 	var err error
 	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, chainConfig, eth.engine, vmConfig, lastAcceptedHash)
 	if err != nil {
 		return nil, err
 	}
-
-	if err := eth.handleOfflinePruning(cacheConfig, chainConfig, vmConfig, lastAcceptedHash); err != nil {
-		return nil, err
-	}
-
 	eth.bloomIndexer.Start(eth.blockchain)
 
+	// Original code (requires disk):
+	// if config.TxPool.Journal != "" {
+	// 	config.TxPool.Journal = stack.ResolvePath(config.TxPool.Journal)
+	// }
 	config.TxPool.Journal = ""
 	eth.txPool = core.NewTxPool(config.TxPool, chainConfig, eth.blockchain)
 
 	eth.miner = miner.New(eth, &config.Miner, chainConfig, eth.EventMux(), eth.engine, clock)
 
-	allowUnprotectedTxHashes := make(map[common.Hash]struct{})
-	for _, txHash := range config.AllowUnprotectedTxHashes {
-		allowUnprotectedTxHashes[txHash] = struct{}{}
-	}
-
 	eth.APIBackend = &EthAPIBackend{
-		extRPCEnabled:            stack.Config().ExtRPCEnabled(),
-		allowUnprotectedTxs:      config.AllowUnprotectedTxs,
-		allowUnprotectedTxHashes: allowUnprotectedTxHashes,
-		eth:                      eth,
+		extRPCEnabled:       stack.Config().ExtRPCEnabled(),
+		allowUnprotectedTxs: config.AllowUnprotectedTxs,
+		eth:                 eth,
 	}
 	if config.AllowUnprotectedTxs {
 		log.Info("Unprotected transactions allowed")
 	}
 	gpoParams := config.GPO
-	eth.APIBackend.gpo, err = gasprice.NewOracle(eth.APIBackend, gpoParams)
+	eth.APIBackend.gpo = gasprice.NewOracle(eth.APIBackend, gpoParams)
+
 	if err != nil {
 		return nil, err
 	}
 
 	// Start the RPC service
-	eth.netRPCService = ethapi.NewNetAPI(eth.NetVersion())
+	eth.netRPCService = ethapi.NewPublicNetAPI(eth.NetVersion())
 
-	eth.stackRPCs = stack.APIs()
-
-	// Successful startup; push a marker and check previous unclean shutdowns.
-	eth.shutdownTracker.MarkStartup()
+	// Register the backend on the node
+	stack.RegisterAPIs(eth.APIs())
 
 	return eth, nil
 }
@@ -279,36 +222,36 @@ func (s *Ethereum) APIs() []rpc.API {
 	// Append tracing APIs
 	apis = append(apis, tracers.APIs(s.APIBackend)...)
 
-	// Add the APIs from the node
-	apis = append(apis, s.stackRPCs...)
-
-	// Create [filterSystem] with the log cache size set in the config.
-	filterSystem := filters.NewFilterSystem(s.APIBackend, filters.Config{
-		Timeout: 5 * time.Minute,
-	})
-
 	// Append all the local APIs and return
 	return append(apis, []rpc.API{
 		{
 			Namespace: "eth",
-			Service:   NewEthereumAPI(s),
-			Name:      "eth",
+			Version:   "1.0",
+			Service:   NewPublicEthereumAPI(s),
+			Public:    true,
 		}, {
 			Namespace: "eth",
-			Service:   filters.NewFilterAPI(filterSystem, false /* isLightClient */),
-			Name:      "eth-filter",
+			Version:   "1.0",
+			Service:   filters.NewPublicFilterAPI(s.APIBackend, false, 5*time.Minute),
+			Public:    true,
 		}, {
 			Namespace: "admin",
-			Service:   NewAdminAPI(s),
-			Name:      "admin",
+			Version:   "1.0",
+			Service:   NewPrivateAdminAPI(s),
 		}, {
 			Namespace: "debug",
-			Service:   NewDebugAPI(s),
-			Name:      "debug",
+			Version:   "1.0",
+			Service:   NewPublicDebugAPI(s),
+			Public:    true,
+		}, {
+			Namespace: "debug",
+			Version:   "1.0",
+			Service:   NewPrivateDebugAPI(s),
 		}, {
 			Namespace: "net",
+			Version:   "1.0",
 			Service:   s.netRPCService,
-			Name:      "net",
+			Public:    true,
 		},
 	}...)
 }
@@ -363,9 +306,6 @@ func (s *Ethereum) BloomIndexer() *core.ChainIndexer { return s.bloomIndexer }
 func (s *Ethereum) Start() {
 	// Start the bloom bits servicing goroutines
 	s.startBloomHandlers(params.BloomBitsBlocks)
-
-	// Regularly update shutdown marker
-	s.shutdownTracker.Start()
 }
 
 // Stop implements node.Lifecycle, terminating all internal goroutines used by the
@@ -377,10 +317,6 @@ func (s *Ethereum) Stop() error {
 	s.txPool.Stop()
 	s.blockchain.Stop()
 	s.engine.Close()
-
-	// Clean shutdown marker as the last thing before closing db
-	s.shutdownTracker.Stop()
-
 	s.chainDb.Close()
 	s.eventMux.Stop()
 	return nil
@@ -388,83 +324,4 @@ func (s *Ethereum) Stop() error {
 
 func (s *Ethereum) LastAcceptedBlock() *types.Block {
 	return s.blockchain.LastAcceptedBlock()
-}
-
-// precheckPopulateMissingTries returns an error if config flags should prevent
-// [populateMissingTries]
-//
-// NOTE: [populateMissingTries] is called from [New] to ensure all
-// state is repaired before any async processes (specifically snapshot re-generation)
-// are started which could interfere with historical re-generation.
-func (s *Ethereum) precheckPopulateMissingTries() error {
-	if s.config.PopulateMissingTries != nil && (s.config.Pruning || s.config.OfflinePruning) {
-		return fmt.Errorf("cannot run populate missing tries when pruning (enabled: %t)/offline pruning (enabled: %t) is enabled", s.config.Pruning, s.config.OfflinePruning)
-	}
-
-	if s.config.PopulateMissingTries == nil {
-		// Delete the populate missing tries marker to indicate that the node started with
-		// populate missing tries disabled.
-		if err := rawdb.DeletePopulateMissingTries(s.chainDb); err != nil {
-			return fmt.Errorf("failed to write populate missing tries disabled marker: %w", err)
-		}
-		return nil
-	}
-
-	if lastRun, err := rawdb.ReadPopulateMissingTries(s.chainDb); err == nil {
-		log.Error("Populate missing tries is not meant to be left enabled permanently. Please disable populate missing tries and allow your node to start successfully before running again.")
-		return fmt.Errorf("cannot start chain with populate missing tries enabled on consecutive starts (last=%v)", lastRun)
-	}
-
-	// Note: Time Marker is written inside of [populateMissingTries] once it
-	// succeeds inside of [NewBlockChain]
-	return nil
-}
-
-func (s *Ethereum) handleOfflinePruning(cacheConfig *core.CacheConfig, chainConfig *params.ChainConfig, vmConfig vm.Config, lastAcceptedHash common.Hash) error {
-	if s.config.OfflinePruning && !s.config.Pruning {
-		return core.ErrRefuseToCorruptArchiver
-	}
-
-	if !s.config.OfflinePruning {
-		// Delete the offline pruning marker to indicate that the node started with offline pruning disabled.
-		if err := rawdb.DeleteOfflinePruning(s.chainDb); err != nil {
-			return fmt.Errorf("failed to write offline pruning disabled marker: %w", err)
-		}
-		return nil
-	}
-
-	// Perform offline pruning after NewBlockChain has been called to ensure that we have rolled back the chain
-	// to the last accepted block before pruning begins.
-	// If offline pruning marker is on disk, then we force the node to be started with offline pruning disabled
-	// before allowing another run of offline pruning.
-	if lastRun, err := rawdb.ReadOfflinePruning(s.chainDb); err == nil {
-		log.Error("Offline pruning is not meant to be left enabled permanently. Please disable offline pruning and allow your node to start successfully before running offline pruning again.")
-		return fmt.Errorf("cannot start chain with offline pruning enabled on consecutive starts (last=%v)", lastRun)
-	}
-
-	// Clean up middle roots
-	if err := s.blockchain.CleanBlockRootsAboveLastAccepted(); err != nil {
-		return err
-	}
-	targetRoot := s.blockchain.LastAcceptedBlock().Root()
-
-	// Allow the blockchain to be garbage collected immediately, since we will shut down the chain after offline pruning completes.
-	s.blockchain.Stop()
-	s.blockchain = nil
-	log.Info("Starting offline pruning", "dataDir", s.config.OfflinePruningDataDirectory, "bloomFilterSize", s.config.OfflinePruningBloomFilterSize)
-	pruner, err := pruner.NewPruner(s.chainDb, s.config.OfflinePruningDataDirectory, s.config.OfflinePruningBloomFilterSize)
-	if err != nil {
-		return fmt.Errorf("failed to create new pruner with data directory: %s, size: %d, due to: %w", s.config.OfflinePruningDataDirectory, s.config.OfflinePruningBloomFilterSize, err)
-	}
-	if err := pruner.Prune(targetRoot); err != nil {
-		return fmt.Errorf("failed to prune blockchain with target root: %s due to: %w", targetRoot, err)
-	}
-	// Note: Time Marker is written inside of [Prune] before compaction begins
-	// (considered an optional optimization)
-	s.blockchain, err = core.NewBlockChain(s.chainDb, cacheConfig, chainConfig, s.engine, vmConfig, lastAcceptedHash)
-	if err != nil {
-		return fmt.Errorf("failed to re-initialize blockchain after offline pruning: %w", err)
-	}
-
-	return nil
 }

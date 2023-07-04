@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/lasthyphen/dijetsnode/api"
-	"github.com/lasthyphen/dijetsnode/utils/profiler"
+	"github.com/lasthyphen/dijetalgo/api"
+	"github.com/lasthyphen/dijetalgo/utils/profiler"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -26,50 +26,52 @@ func NewAdminService(vm *VM, performanceDir string) *Admin {
 }
 
 // StartCPUProfiler starts a cpu profile writing to the specified file
-func (p *Admin) StartCPUProfiler(_ *http.Request, _ *struct{}, _ *api.EmptyReply) error {
+func (p *Admin) StartCPUProfiler(r *http.Request, args *struct{}, reply *api.SuccessResponse) error {
 	log.Info("Admin: StartCPUProfiler called")
 
-	return p.profiler.StartCPUProfiler()
+	err := p.profiler.StartCPUProfiler()
+	reply.Success = err == nil
+	return err
 }
 
 // StopCPUProfiler stops the cpu profile
-func (p *Admin) StopCPUProfiler(r *http.Request, _ *struct{}, _ *api.EmptyReply) error {
+func (p *Admin) StopCPUProfiler(r *http.Request, args *struct{}, reply *api.SuccessResponse) error {
 	log.Info("Admin: StopCPUProfiler called")
 
-	return p.profiler.StopCPUProfiler()
+	err := p.profiler.StopCPUProfiler()
+	reply.Success = err == nil
+	return err
 }
 
 // MemoryProfile runs a memory profile writing to the specified file
-func (p *Admin) MemoryProfile(_ *http.Request, _ *struct{}, _ *api.EmptyReply) error {
+func (p *Admin) MemoryProfile(r *http.Request, args *struct{}, reply *api.SuccessResponse) error {
 	log.Info("Admin: MemoryProfile called")
 
-	return p.profiler.MemoryProfile()
+	err := p.profiler.MemoryProfile()
+	reply.Success = err == nil
+	return err
 }
 
 // LockProfile runs a mutex profile writing to the specified file
-func (p *Admin) LockProfile(_ *http.Request, _ *struct{}, _ *api.EmptyReply) error {
+func (p *Admin) LockProfile(r *http.Request, args *struct{}, reply *api.SuccessResponse) error {
 	log.Info("Admin: LockProfile called")
 
-	return p.profiler.LockProfile()
+	err := p.profiler.LockProfile()
+	reply.Success = err == nil
+	return err
 }
 
 type SetLogLevelArgs struct {
 	Level string `json:"level"`
 }
 
-func (p *Admin) SetLogLevel(_ *http.Request, args *SetLogLevelArgs, reply *api.EmptyReply) error {
+func (p *Admin) SetLogLevel(r *http.Request, args *SetLogLevelArgs, reply *api.SuccessResponse) error {
 	log.Info("EVM: SetLogLevel called", "logLevel", args.Level)
-	if err := p.vm.logger.SetLogLevel(args.Level); err != nil {
+	logLevel, err := log.LvlFromString(args.Level)
+	if err != nil {
 		return fmt.Errorf("failed to parse log level: %w ", err)
 	}
-	return nil
-}
-
-type ConfigReply struct {
-	Config *Config `json:"config"`
-}
-
-func (p *Admin) GetVMConfig(_ *http.Request, _ *struct{}, reply *ConfigReply) error {
-	reply.Config = &p.vm.config
+	p.vm.setLogLevel(logLevel)
+	reply.Success = true
 	return nil
 }

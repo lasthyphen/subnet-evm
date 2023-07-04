@@ -8,7 +8,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/lasthyphen/dijetsnode/utils/formatting"
+	"github.com/lasthyphen/dijetalgo/utils/formatting"
 	"github.com/lasthyphen/subnet-evm/core"
 	"github.com/lasthyphen/subnet-evm/params"
 	"github.com/stretchr/testify/assert"
@@ -33,7 +33,6 @@ func TestBuildGenesis(t *testing.T) {
 	genesis.Config.FeeConfig = params.DefaultFeeConfig
 	testGasLimit := big.NewInt(999999)
 	genesis.Config.FeeConfig.GasLimit = testGasLimit
-	genesis.GasLimit = testGasLimit.Uint64()
 
 	args := &BuildGenesisArgs{GenesisData: genesis}
 	reply := &BuildGenesisReply{}
@@ -50,7 +49,7 @@ func TestBuildGenesis(t *testing.T) {
 	decodedGenesis := &core.Genesis{}
 	decodedGenesis.UnmarshalJSON(genesisBytes)
 	// test
-	assert.Equal(t, testGasLimit, decodedGenesis.Config.FeeConfig.GasLimit)
+	assert.Equal(t, testGasLimit, decodedGenesis.Config.GetFeeConfig().GasLimit)
 	assert.Equal(t, testAlloc, decodedGenesis.Alloc)
 }
 
@@ -71,7 +70,6 @@ func TestDecodeGenesis(t *testing.T) {
 	genesis.Config.FeeConfig = params.DefaultFeeConfig
 	testGasLimit := big.NewInt(999999)
 	genesis.Config.FeeConfig.GasLimit = testGasLimit
-	genesis.GasLimit = testGasLimit.Uint64()
 
 	args := &BuildGenesisArgs{GenesisData: genesis}
 	reply := &BuildGenesisReply{}
@@ -90,6 +88,6 @@ func TestDecodeGenesis(t *testing.T) {
 	decodedGenesis := decReply.Genesis
 
 	// test
-	assert.Equal(t, testGasLimit, decodedGenesis.Config.FeeConfig.GasLimit)
+	assert.Equal(t, testGasLimit, decodedGenesis.Config.GetFeeConfig().GasLimit)
 	assert.Equal(t, testAlloc, decodedGenesis.Alloc)
 }

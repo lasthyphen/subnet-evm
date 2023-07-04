@@ -27,19 +27,15 @@
 package core
 
 import (
-	"fmt"
 	"math/big"
 
-	"github.com/lasthyphen/subnet-evm/commontype"
 	"github.com/lasthyphen/subnet-evm/consensus"
-	"github.com/lasthyphen/subnet-evm/constants"
 	"github.com/lasthyphen/subnet-evm/core/rawdb"
 	"github.com/lasthyphen/subnet-evm/core/state"
 	"github.com/lasthyphen/subnet-evm/core/state/snapshot"
 	"github.com/lasthyphen/subnet-evm/core/types"
 	"github.com/lasthyphen/subnet-evm/core/vm"
 	"github.com/lasthyphen/subnet-evm/params"
-	"github.com/lasthyphen/subnet-evm/precompile"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/event"
 )
@@ -105,9 +101,6 @@ func (bc *BlockChain) GetBody(hash common.Hash) *types.Body {
 func (bc *BlockChain) HasBlock(hash common.Hash, number uint64) bool {
 	if bc.blockCache.Contains(hash) {
 		return true
-	}
-	if !bc.HasHeader(hash, number) {
-		return false
 	}
 	return rawdb.HasBody(bc.db, hash, number)
 }
@@ -215,6 +208,12 @@ func (bc *BlockChain) GetTransactionLookup(hash common.Hash) *rawdb.LegacyTxLook
 	return lookup
 }
 
+// GetTd retrieves a block's total difficulty in the canonical chain from the
+// database by hash and number, caching it if found.
+func (bc *BlockChain) GetTd(hash common.Hash, number uint64) *big.Int {
+	return bc.hc.GetTd(hash, number)
+}
+
 // HasState checks if state trie is fully present in the database or not.
 func (bc *BlockChain) HasState(hash common.Hash) bool {
 	_, err := bc.stateCache.OpenTrie(hash)
@@ -235,13 +234,25 @@ func (bc *BlockChain) HasBlockAndState(hash common.Hash, number uint64) bool {
 // TrieNode retrieves a blob of data associated with a trie node
 // either from ephemeral in-memory cache, or from persistent storage.
 func (bc *BlockChain) TrieNode(hash common.Hash) ([]byte, error) {
-	return bc.stateCache.TrieDB().RawNode(hash)
+	return bc.stateCache.TrieDB().Node(hash)
 }
 
 // ContractCode retrieves a blob of data associated with a contract hash
 // either from ephemeral in-memory cache, or from persistent storage.
 func (bc *BlockChain) ContractCode(hash common.Hash) ([]byte, error) {
 	return bc.stateCache.ContractCode(common.Hash{}, hash)
+}
+
+// ContractCodeWithPrefix retrieves a blob of data associated with a contract
+// hash either from ephemeral in-memory cache, or from persistent storage.
+//
+// If the code doesn't exist in the in-memory cache, check the storage with
+// new code scheme.
+func (bc *BlockChain) ContractCodeWithPrefix(hash common.Hash) ([]byte, error) {
+	type codeReader interface {
+		ContractCodeWithPrefix(addrHash, codeHash common.Hash) ([]byte, error)
+	}
+	return bc.stateCache.(codeReader).ContractCodeWithPrefix(common.Hash{}, hash)
 }
 
 // State returns a new mutable state based on the current HEAD block.
@@ -339,92 +350,4 @@ func (bc *BlockChain) SubscribeAcceptedLogsEvent(ch chan<- []*types.Log) event.S
 // SubscribeAcceptedTransactionEvent registers a subscription of accepted transactions
 func (bc *BlockChain) SubscribeAcceptedTransactionEvent(ch chan<- NewTxsEvent) event.Subscription {
 	return bc.scope.Track(bc.txAcceptedFeed.Subscribe(ch))
-}
-
-// GetFeeConfigAt returns the fee configuration and the last changed block number at [parent].
-// If FeeConfigManager is activated at [parent], returns the fee config in the precompile contract state.
-// Otherwise returns the fee config in the chain config.
-// Assumes that a valid configuration is stored when the precompile is activated.
-func (bc *BlockChain) GetFeeConfigAt(parent *types.Header) (commontype.FeeConfig, *big.Int, error) {
-	config := bc.Config()
-	bigTime := new(big.Int).SetUint64(parent.Time)
-	if !config.IsFeeConfigManager(bigTime) {
-		return config.FeeConfig, common.Big0, nil
-	}
-
-	// try to return it from the cache
-	if cached, hit := bc.feeConfigCache.Get(parent.Root); hit {
-		cachedFeeConfig, ok := cached.(*cacheableFeeConfig)
-		if !ok {
-			return commontype.EmptyFeeConfig, nil, fmt.Errorf("expected type cacheableFeeConfig, got %T", cached)
-		}
-		return cachedFeeConfig.feeConfig, cachedFeeConfig.lastChangedAt, nil
-	}
-
-	stateDB, err := bc.StateAt(parent.Root)
-	if err != nil {
-		return commontype.EmptyFeeConfig, nil, err
-	}
-
-	storedFeeConfig := precompile.GetStoredFeeConfig(stateDB)
-	// this should not return an invalid fee config since it's assumed that
-	// StoreFeeConfig returns an error when an invalid fee config is attempted to be stored.
-	// However an external stateDB call can modify the contract state.
-	// This check is added to add a defense in-depth.
-	if err := storedFeeConfig.Verify(); err != nil {
-		return commontype.EmptyFeeConfig, nil, err
-	}
-	lastChangedAt := precompile.GetFeeConfigLastChangedAt(stateDB)
-	cacheable := &cacheableFeeConfig{feeConfig: storedFeeConfig, lastChangedAt: lastChangedAt}
-	// add it to the cache
-	bc.feeConfigCache.Add(parent.Root, cacheable)
-	return storedFeeConfig, lastChangedAt, nil
-}
-
-// GetCoinbaseAt returns the configured coinbase address at [parent].
-// If RewardManager is activated at [parent], returns the reward manager config in the precompile contract state.
-// If fee recipients are allowed, returns true in the second return value.
-func (bc *BlockChain) GetCoinbaseAt(parent *types.Header) (common.Address, bool, error) {
-	config := bc.Config()
-	bigTime := new(big.Int).SetUint64(parent.Time)
-
-	if !config.IsSubnetEVM(bigTime) {
-		return constants.BlackholeAddr, false, nil
-	}
-
-	if !config.IsRewardManager(bigTime) {
-		if bc.chainConfig.AllowFeeRecipients {
-			return common.Address{}, true, nil
-		} else {
-			return constants.BlackholeAddr, false, nil
-		}
-	}
-
-	// try to return it from the cache
-	if cached, hit := bc.coinbaseConfigCache.Get(parent.Root); hit {
-		cachedCoinbaseConfig, ok := cached.(*cacheableCoinbaseConfig)
-		if !ok {
-			return common.Address{}, false, fmt.Errorf("expected type cachedCoinbaseConfig, got %T", cached)
-		}
-		return cachedCoinbaseConfig.coinbaseAddress, cachedCoinbaseConfig.allowFeeRecipients, nil
-	}
-
-	stateDB, err := bc.StateAt(parent.Root)
-	if err != nil {
-		return common.Address{}, false, err
-	}
-	rewardAddress, feeRecipients := precompile.GetStoredRewardAddress(stateDB)
-
-	cacheable := &cacheableCoinbaseConfig{coinbaseAddress: rewardAddress, allowFeeRecipients: feeRecipients}
-	bc.coinbaseConfigCache.Add(parent.Root, cacheable)
-	return rewardAddress, feeRecipients, nil
-}
-
-// GetLogs fetches all logs from a given block.
-func (bc *BlockChain) GetLogs(hash common.Hash, number uint64) [][]*types.Log {
-	logs, ok := bc.acceptedLogsCache.Get(hash) // this cache is thread-safe
-	if ok {
-		return logs
-	}
-	return rawdb.ReadLogs(bc.db, hash, number)
 }

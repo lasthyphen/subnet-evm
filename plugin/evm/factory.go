@@ -4,14 +4,14 @@
 package evm
 
 import (
-	"github.com/lasthyphen/dijetsnode/ids"
-	"github.com/lasthyphen/dijetsnode/snow"
-	"github.com/lasthyphen/dijetsnode/vms"
+	"github.com/lasthyphen/dijetalgo/ids"
+	"github.com/lasthyphen/dijetalgo/snow"
+	"github.com/lasthyphen/dijetalgo/vms"
 )
 
 var (
 	// ID this VM should be referenced by
-	ID = ids.ID{'s', 'u', 'b', 'n', 'e', 't', 'e', 'v', 'm'}
+	ID = ids.ID{'e', 'v', 'm'}
 
 	_ vms.Factory = &Factory{}
 )

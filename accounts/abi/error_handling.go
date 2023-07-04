@@ -83,6 +83,7 @@ func typeCheck(t Type, value reflect.Value) error {
 	} else {
 		return nil
 	}
+
 }
 
 // typeErr returns a formatted type casting error.

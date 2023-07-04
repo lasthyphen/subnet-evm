@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 
-# Set up the versions to be used - populate ENV variables only if they are not already populated
-SUBNET_EVM_VERSION=${SUBNET_EVM_VERSION:-'v0.4.9'}
+# Set up the versions to be used
+subnet_evm_version=${SUBNET_EVM_VERSION:-'v0.1.0'}
 # Don't export them as they're used in the context of other calls
-DIJETSNODE_VERSION=${DIJETS_VERSION:-'v1.9.8'}
-GINKGO_VERSION=${GINKGO_VERSION:-'v2.2.0'}
-
-# This won't be used, but it's here to make code syncs easier
-LATEST_CORETH_VERSION=0.11.6
+avalanche_version=${AVALANCHE_VERSION:-'v1.7.1'}

@@ -36,17 +36,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lasthyphen/subnet-evm/commontype"
 	"github.com/lasthyphen/subnet-evm/consensus/dummy"
 	"github.com/lasthyphen/subnet-evm/core/state"
 	"github.com/lasthyphen/subnet-evm/core/types"
-	"github.com/lasthyphen/subnet-evm/metrics"
 	"github.com/lasthyphen/subnet-evm/params"
-	"github.com/lasthyphen/subnet-evm/precompile"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/prque"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/metrics"
 )
 
 const (
@@ -63,8 +61,6 @@ const (
 	// non-trivial consequences: larger transactions are significantly harder and
 	// more expensive to propagate; larger transactions also take more resources
 	// to validate whether they fit into the pool or not.
-	//
-	// Note: the max contract size is 24KB
 	txMaxSize = 4 * txSlotSize // 128KB
 )
 
@@ -152,6 +148,7 @@ const (
 	TxStatusUnknown TxStatus = iota
 	TxStatusQueued
 	TxStatusPending
+	TxStatusIncluded
 )
 
 // blockChain provides the state of blockchain and current gas limit to do
@@ -161,7 +158,6 @@ type blockChain interface {
 	GetBlock(hash common.Hash, number uint64) *types.Block
 	StateAt(root common.Hash) (*state.StateDB, error)
 	SenderCacher() *TxSenderCacher
-	GetFeeConfigAt(parent *types.Header) (commontype.FeeConfig, *big.Int, error)
 
 	SubscribeChainHeadEvent(ch chan<- ChainHeadEvent) event.Subscription
 }
@@ -610,46 +606,6 @@ func (pool *TxPool) Pending(enforceTips bool) map[common.Address]types.Transacti
 	return pending
 }
 
-// PendingSize returns the number of pending txs in the tx pool.
-func (pool *TxPool) PendingSize() int {
-	pending := pool.Pending(true)
-	count := 0
-	for _, txs := range pending {
-		count += len(txs)
-	}
-	return count
-}
-
-// PendingFrom returns the same set of transactions that would be returned from Pending restricted to only
-// transactions from [addrs].
-func (pool *TxPool) PendingFrom(addrs []common.Address, enforceTips bool) map[common.Address]types.Transactions {
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-
-	pending := make(map[common.Address]types.Transactions)
-	for _, addr := range addrs {
-		list, ok := pool.pending[addr]
-		if !ok {
-			continue
-		}
-		txs := list.Flatten()
-
-		// If the miner requests tip enforcement, cap the lists now
-		if enforceTips && !pool.locals.contains(addr) {
-			for i, tx := range txs {
-				if tx.EffectiveGasTipIntCmp(pool.gasPrice, pool.priced.urgent.baseFee) < 0 {
-					txs = txs[:i]
-					break
-				}
-			}
-		}
-		if len(txs) > 0 {
-			pending[addr] = txs
-		}
-	}
-	return pending
-}
-
 // Locals retrieves the accounts currently considered local by the pool.
 func (pool *TxPool) Locals() []common.Address {
 	pool.mu.Lock()
@@ -674,30 +630,14 @@ func (pool *TxPool) local() map[common.Address]types.Transactions {
 	return txs
 }
 
-// checks transaction validity against the current state.
-func (pool *TxPool) checkTxState(from common.Address, tx *types.Transaction) error {
+func (pool *TxPool) CheckNonceOrdering(from common.Address, txNonce uint64) error {
 	pool.currentStateLock.Lock()
 	defer pool.currentStateLock.Unlock()
 
-	// cost == V + GP * GL
-	if balance, cost := pool.currentState.GetBalance(from), tx.Cost(); balance.Cmp(cost) < 0 {
-		return fmt.Errorf("%w: address %s have (%d) want (%d)", ErrInsufficientFunds, from.Hex(), balance, cost)
-	}
-
-	txNonce := tx.Nonce()
 	// Ensure the transaction adheres to nonce ordering
-	if currentNonce := pool.currentState.GetNonce(from); currentNonce > txNonce {
+	if currentNonce, txNonce := pool.currentState.GetNonce(from), txNonce; currentNonce > txNonce {
 		return fmt.Errorf("%w: address %s current nonce (%d) > tx nonce (%d)",
 			ErrNonceTooLow, from.Hex(), currentNonce, txNonce)
-	}
-
-	// If the tx allow list is enabled, return an error if the from address is not allow listed.
-	headTimestamp := big.NewInt(int64(pool.currentHead.Time))
-	if pool.chainconfig.IsTxAllowList(headTimestamp) {
-		txAllowListRole := precompile.GetTxAllowListStatus(pool.currentState, from)
-		if !txAllowListRole.IsEnabled() {
-			return fmt.Errorf("%w: %s", precompile.ErrSenderAddressNotAllowListed, from)
-		}
 	}
 	return nil
 }
@@ -714,8 +654,8 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		return ErrTxTypeNotSupported
 	}
 	// Reject transactions over defined size to prevent DOS attacks
-	if txSize := uint64(tx.Size()); txSize > txMaxSize {
-		return fmt.Errorf("%w tx size %d > max size %d", ErrOversizedData, txSize, txMaxSize)
+	if uint64(tx.Size()) > txMaxSize {
+		return ErrOversizedData
 	}
 	// Transactions can't be negative. This may never happen using RLP decoded
 	// transactions but may occur if you create a transaction using the RPC.
@@ -750,13 +690,18 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 	if pool.minimumFee != nil && tx.GasFeeCapIntCmp(pool.minimumFee) < 0 {
 		return fmt.Errorf("%w: address %s have gas fee cap (%d) < pool minimum fee cap (%d)", ErrUnderpriced, from.Hex(), tx.GasFeeCap(), pool.minimumFee)
 	}
-
 	// Ensure the transaction adheres to nonce ordering
-	if err := pool.checkTxState(from, tx); err != nil {
+	if err := pool.CheckNonceOrdering(from, tx.Nonce()); err != nil {
 		return err
 	}
 	// Transactor should have enough funds to cover the costs
-
+	// cost == V + GP * GL
+	pool.currentStateLock.Lock()
+	if balance, cost := pool.currentState.GetBalance(from), tx.Cost(); balance.Cmp(cost) < 0 {
+		pool.currentStateLock.Unlock()
+		return fmt.Errorf("%w: address %s have (%d) want (%d)", ErrInsufficientFunds, from.Hex(), balance, cost)
+	}
+	pool.currentStateLock.Unlock()
 	// Ensure the transaction has more gas than the basic tx fee.
 	intrGas, err := IntrinsicGas(tx.Data(), tx.AccessList(), tx.To() == nil, true, pool.istanbul)
 	if err != nil {
@@ -1115,13 +1060,6 @@ func (pool *TxPool) HasLocal(hash common.Hash) bool {
 	return pool.all.GetLocal(hash) != nil
 }
 
-func (pool *TxPool) RemoveTx(hash common.Hash) {
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-
-	pool.removeTx(hash, true)
-}
-
 // removeTx removes a single transaction from the queue, moving all subsequent
 // transactions back to the future queue.
 func (pool *TxPool) removeTx(hash common.Hash, outofbound bool) {
@@ -1315,8 +1253,9 @@ func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirt
 	if reset != nil {
 		pool.demoteUnexecutables()
 		if reset.newHead != nil && pool.chainconfig.IsSubnetEVM(new(big.Int).SetUint64(reset.newHead.Time)) {
-			if err := pool.updateBaseFeeAt(reset.newHead); err != nil {
-				log.Error("error at updating base fee in tx pool", "error", err)
+			_, baseFeeEstimate, err := dummy.CalcBaseFee(pool.chainconfig, reset.newHead, uint64(time.Now().Unix()))
+			if err == nil {
+				pool.priced.SetBaseFee(baseFeeEstimate)
 			}
 		}
 
@@ -1438,21 +1377,6 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 	pool.currentStateLock.Unlock()
 	pool.pendingNonces = newTxNoncer(statedb)
 	pool.currentMaxGas = newHead.GasLimit
-
-	// when we reset txPool we should explicitly check if fee struct for min base fee has changed
-	// so that we can correctly drop txs with < minBaseFee from tx pool.
-	// TODO: this should be checking IsSubnetEVM since we also support minimumFee for SubnetEVM
-	// without requiring FeeConfigManager is enabled.
-	// This is already being set by SetMinFee when gas price updater starts.
-	// However tests are currently failing if we change this check to IsSubnetEVM.
-	if pool.chainconfig.IsFeeConfigManager(new(big.Int).SetUint64(newHead.Time)) {
-		feeConfig, _, err := pool.chain.GetFeeConfigAt(newHead)
-		if err != nil {
-			log.Error("Failed to get fee config state", "err", err, "root", newHead.Root)
-			return
-		}
-		pool.minimumFee = feeConfig.MinBaseFee
-	}
 
 	// Inject any transactions discarded due to reorgs
 	log.Debug("Reinjecting stale transactions", "count", len(reinject))
@@ -1624,7 +1548,7 @@ func (pool *TxPool) truncatePending() {
 	pendingRateLimitMeter.Mark(int64(pendingBeforeCap - pending))
 }
 
-// truncateQueue drops the oldest transactions in the queue if the pool is above the global queue limit.
+// truncateQueue drops the oldes transactions in the queue if the pool is above the global queue limit.
 func (pool *TxPool) truncateQueue() {
 	queued := uint64(0)
 	for _, list := range pool.queue {
@@ -1641,7 +1565,7 @@ func (pool *TxPool) truncateQueue() {
 			addresses = append(addresses, addressByHeartbeat{addr, pool.beats[addr]})
 		}
 	}
-	sort.Sort(sort.Reverse(addresses))
+	sort.Sort(addresses)
 
 	// Drop transactions until the total is below the limit or only locals remain
 	for drop := queued - pool.config.GlobalQueue; drop > 0 && len(addresses) > 0; {
@@ -1772,24 +1696,12 @@ func (pool *TxPool) updateBaseFee() {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
-	err := pool.updateBaseFeeAt(pool.currentHead)
-	if err != nil {
+	_, baseFeeEstimate, err := dummy.CalcBaseFee(pool.chainconfig, pool.currentHead, uint64(time.Now().Unix()))
+	if err == nil {
+		pool.priced.SetBaseFee(baseFeeEstimate)
+	} else {
 		log.Error("failed to update base fee", "currentHead", pool.currentHead.Hash(), "err", err)
 	}
-}
-
-// assumes lock is already held
-func (pool *TxPool) updateBaseFeeAt(head *types.Header) error {
-	feeConfig, _, err := pool.chain.GetFeeConfigAt(head)
-	if err != nil {
-		return err
-	}
-	_, baseFeeEstimate, err := dummy.EstimateNextBaseFee(pool.chainconfig, feeConfig, head, uint64(time.Now().Unix()))
-	if err != nil {
-		return err
-	}
-	pool.priced.SetBaseFee(baseFeeEstimate)
-	return nil
 }
 
 // addressByHeartbeat is an account address tagged with its last activity timestamp.
@@ -1829,6 +1741,10 @@ func newAccountSet(signer types.Signer, addrs ...common.Address) *accountSet {
 func (as *accountSet) contains(addr common.Address) bool {
 	_, exist := as.accounts[addr]
 	return exist
+}
+
+func (as *accountSet) empty() bool {
+	return len(as.accounts) == 0
 }
 
 // containsTx checks if the sender of a given tx is within the set. If the sender

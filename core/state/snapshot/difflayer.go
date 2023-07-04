@@ -275,9 +275,6 @@ func (dl *diffLayer) BlockHash() common.Hash {
 
 // Parent returns the subsequent layer of a diff layer.
 func (dl *diffLayer) Parent() snapshot {
-	dl.lock.RLock()
-	defer dl.lock.RUnlock()
-
 	return dl.parent
 }
 
@@ -490,6 +487,7 @@ func (dl *diffLayer) flatten() snapshot {
 		for storageHash, data := range storage {
 			comboData[storageHash] = data
 		}
+		parent.storageData[accountHash] = comboData
 	}
 	// Return the combo parent
 	return &diffLayer{

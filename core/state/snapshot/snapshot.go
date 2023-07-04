@@ -35,13 +35,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/VictoriaMetrics/fastcache"
 	"github.com/lasthyphen/subnet-evm/core/rawdb"
 	"github.com/lasthyphen/subnet-evm/ethdb"
-	"github.com/lasthyphen/subnet-evm/metrics"
 	"github.com/lasthyphen/subnet-evm/trie"
-	"github.com/lasthyphen/subnet-evm/utils"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/metrics"
 )
 
 const (
@@ -134,12 +134,6 @@ type Snapshot interface {
 	// Storage directly retrieves the storage data associated with a particular hash,
 	// within a particular account.
 	Storage(accountHash, storageHash common.Hash) ([]byte, error)
-
-	// AccountIterator creates an account iterator over the account trie given by the provided root hash.
-	AccountIterator(seek common.Hash) AccountIterator
-
-	// StorageIterator creates a storage iterator over the storage trie given by the provided root hash.
-	StorageIterator(account common.Hash, seek common.Hash) (StorageIterator, bool)
 }
 
 // snapshot is the internal version of the snapshot data layer that supports some
@@ -165,6 +159,12 @@ type snapshot interface {
 	// Stale return whether this layer has become stale (was flattened across) or
 	// if it's still live.
 	Stale() bool
+
+	// AccountIterator creates an account iterator over an arbitrary layer.
+	AccountIterator(seek common.Hash) AccountIterator
+
+	// StorageIterator creates a storage iterator over an arbitrary layer.
+	StorageIterator(account common.Hash, seek common.Hash) (StorageIterator, bool)
 }
 
 // Tree is an Ethereum state snapshot tree. It consists of one persistent base
@@ -599,7 +599,6 @@ func diffToDisk(bottom *diffLayer) (*diskLayer, bool, error) {
 	// Mark the original base as stale as we're going to create a new wrapper
 	base.lock.Lock()
 	if base.stale {
-		base.lock.Unlock()
 		return nil, false, ErrStaleParentLayer // we've committed into the same base from two children, boo
 	}
 	base.stale = true
@@ -617,19 +616,20 @@ func diffToDisk(bottom *diffLayer) (*diskLayer, bool, error) {
 
 		it := rawdb.IterateStorageSnapshots(base.diskdb, hash)
 		for it.Next() {
-			key := it.Key()
-			batch.Delete(key)
-			base.cache.Del(key[1:])
-			snapshotFlushStorageItemMeter.Mark(1)
+			if key := it.Key(); len(key) == 65 { // TODO(karalabe): Yuck, we should move this into the iterator
+				batch.Delete(key)
+				base.cache.Del(key[1:])
+				snapshotFlushStorageItemMeter.Mark(1)
 
-			// Ensure we don't delete too much data blindly (contract can be
-			// huge). It's ok to flush, the root will go missing in case of a
-			// crash and we'll detect and regenerate the snapshot.
-			if batch.ValueSize() > ethdb.IdealBatchSize {
-				if err := batch.Write(); err != nil {
-					log.Crit("Failed to write storage deletions", "err", err)
+				// Ensure we don't delete too much data blindly (contract can be
+				// huge). It's ok to flush, the root will go missing in case of a
+				// crash and we'll detect and regenerate the snapshot.
+				if batch.ValueSize() > ethdb.IdealBatchSize {
+					if err := batch.Write(); err != nil {
+						log.Crit("Failed to write storage deletions", "err", err)
+					}
+					batch.Reset()
 				}
-				batch.Reset()
 			}
 		}
 		it.Release()
@@ -737,6 +737,10 @@ func (t *Tree) Rebuild(blockHash, root common.Hash) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 
+	// Firstly delete any recovery flag in the database. Because now we are
+	// building a brand new snapshot. Also reenable the snapshot feature.
+	rawdb.DeleteSnapshotRecoveryNumber(t.diskdb)
+
 	// Track whether there's a wipe currently running and keep it alive if so
 	var wiper chan struct{}
 
@@ -753,6 +757,7 @@ func (t *Tree) Rebuild(blockHash, root common.Hash) {
 				if stats := layer.genStats; stats != nil {
 					wiper = stats.wiping
 				}
+
 			}
 			// Layer should be inactive now, mark it as stale
 			layer.lock.Lock()
@@ -847,7 +852,6 @@ func (t *Tree) verify(root common.Hash, force bool) error {
 		}
 		return hash, nil
 	}, newGenerateStats(), true)
-
 	if err != nil {
 		return err
 	}
@@ -911,41 +915,13 @@ func (t *Tree) DiskRoot() common.Hash {
 	return t.diskRoot()
 }
 
-func (t *Tree) DiskAccountIterator(seek common.Hash) AccountIterator {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-
-	return t.disklayer().AccountIterator(seek)
-}
-
-func (t *Tree) DiskStorageIterator(account common.Hash, seek common.Hash) StorageIterator {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-
-	it, _ := t.disklayer().StorageIterator(account, seek)
-	return it
-}
-
-// NewDiskLayer creates a diskLayer for direct access to the contents of the on-disk
-// snapshot. Does not perform any validation.
-func NewDiskLayer(diskdb ethdb.KeyValueStore) Snapshot {
-	return &diskLayer{
-		diskdb:  diskdb,
-		created: time.Now(),
-
-		// state sync uses iterators to access data, so this cache is not used.
-		// initializing it out of caution.
-		cache: utils.NewMeteredCache(32*1024, "", "", 0),
-	}
-}
-
 // NewTestTree creates a *Tree with a pre-populated diskLayer
 func NewTestTree(diskdb ethdb.KeyValueStore, blockHash, root common.Hash) *Tree {
 	base := &diskLayer{
 		diskdb:    diskdb,
 		root:      root,
 		blockHash: blockHash,
-		cache:     utils.NewMeteredCache(128*256, "", "", 0),
+		cache:     fastcache.New(128 * 256),
 		created:   time.Now(),
 	}
 	return &Tree{

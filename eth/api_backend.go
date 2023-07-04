@@ -33,7 +33,6 @@ import (
 	"time"
 
 	"github.com/lasthyphen/subnet-evm/accounts"
-	"github.com/lasthyphen/subnet-evm/commontype"
 	"github.com/lasthyphen/subnet-evm/consensus"
 	"github.com/lasthyphen/subnet-evm/consensus/dummy"
 	"github.com/lasthyphen/subnet-evm/core"
@@ -50,15 +49,17 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 )
 
-var ErrUnfinalizedData = errors.New("cannot query unfinalized data")
+var (
+	ErrUnfinalizedData = errors.New("cannot query unfinalized data")
+	errExpired         = errors.New("request expired")
+)
 
 // EthAPIBackend implements ethapi.Backend for full nodes
 type EthAPIBackend struct {
-	extRPCEnabled            bool
-	allowUnprotectedTxs      bool
-	allowUnprotectedTxHashes map[common.Hash]struct{} // Invariant: read-only after creation.
-	eth                      *Ethereum
-	gpo                      *gasprice.Oracle
+	extRPCEnabled       bool
+	allowUnprotectedTxs bool
+	eth                 *Ethereum
+	gpo                 *gasprice.Oracle
 }
 
 // ChainConfig returns the active chain configuration.
@@ -79,8 +80,8 @@ func (b *EthAPIBackend) LastAcceptedBlock() *types.Block {
 }
 
 func (b *EthAPIBackend) HeaderByNumber(ctx context.Context, number rpc.BlockNumber) (*types.Header, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if deadline, exists := ctx.Deadline(); exists && time.Until(deadline) < 0 {
+		return nil, errExpired
 	}
 	// Treat requests for the pending, latest, or accepted block
 	// identically.
@@ -98,53 +99,33 @@ func (b *EthAPIBackend) HeaderByNumber(ctx context.Context, number rpc.BlockNumb
 	return b.eth.blockchain.GetHeaderByNumber(uint64(number)), nil
 }
 
-func (b *EthAPIBackend) GetFeeConfigAt(parent *types.Header) (commontype.FeeConfig, *big.Int, error) {
-	return b.eth.blockchain.GetFeeConfigAt(parent)
-}
-
-func (b *EthAPIBackend) HeaderByHash(ctx context.Context, hash common.Hash) (*types.Header, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	header := b.eth.blockchain.GetHeaderByHash(hash)
-	if header == nil {
-		return nil, nil
-	}
-
-	if b.eth.blockchain.GetCanonicalHash(header.Number.Uint64()) != hash {
-		return nil, nil
-	}
-
-	acceptedBlock := b.eth.LastAcceptedBlock()
-	if !b.GetVMConfig().AllowUnfinalizedQueries && acceptedBlock != nil {
-		if header.Number.Cmp(acceptedBlock.Number()) > 0 {
-			return nil, ErrUnfinalizedData
-		}
-	}
-	return header, nil
-}
-
 func (b *EthAPIBackend) HeaderByNumberOrHash(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*types.Header, error) {
 	if blockNr, ok := blockNrOrHash.Number(); ok {
 		return b.HeaderByNumber(ctx, blockNr)
 	}
 	if hash, ok := blockNrOrHash.Hash(); ok {
-		header, err := b.HeaderByHash(ctx, hash)
-		if err != nil {
-			return nil, err
-		}
+		header := b.eth.blockchain.GetHeaderByHash(hash)
 		if header == nil {
 			return nil, errors.New("header for hash not found")
+		}
+		if blockNrOrHash.RequireCanonical && b.eth.blockchain.GetCanonicalHash(header.Number.Uint64()) != hash {
+			return nil, errors.New("hash is not currently canonical")
 		}
 		return header, nil
 	}
 	return nil, errors.New("invalid arguments; neither block nor hash specified")
 }
 
+func (b *EthAPIBackend) HeaderByHash(ctx context.Context, hash common.Hash) (*types.Header, error) {
+	if deadline, exists := ctx.Deadline(); exists && time.Until(deadline) < 0 {
+		return nil, errExpired
+	}
+	return b.eth.blockchain.GetHeaderByHash(hash), nil
+}
+
 func (b *EthAPIBackend) BlockByNumber(ctx context.Context, number rpc.BlockNumber) (*types.Block, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if deadline, exists := ctx.Deadline(); exists && time.Until(deadline) < 0 {
+		return nil, errExpired
 	}
 	// Treat requests for the pending, latest, or accepted block
 	// identically.
@@ -163,51 +144,42 @@ func (b *EthAPIBackend) BlockByNumber(ctx context.Context, number rpc.BlockNumbe
 }
 
 func (b *EthAPIBackend) BlockByHash(ctx context.Context, hash common.Hash) (*types.Block, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if deadline, exists := ctx.Deadline(); exists && time.Until(deadline) < 0 {
+		return nil, errExpired
 	}
-
-	block := b.eth.blockchain.GetBlockByHash(hash)
-	if block == nil {
-		return nil, nil
-	}
-
-	number := block.Number()
-	if b.eth.blockchain.GetCanonicalHash(number.Uint64()) != hash {
-		return nil, nil
-	}
-
-	acceptedBlock := b.eth.LastAcceptedBlock()
-	if !b.GetVMConfig().AllowUnfinalizedQueries && acceptedBlock != nil {
-		if number.Cmp(acceptedBlock.Number()) > 0 {
-			return nil, ErrUnfinalizedData
-		}
-	}
-	return block, nil
+	return b.eth.blockchain.GetBlockByHash(hash), nil
 }
 
 func (b *EthAPIBackend) BlockByNumberOrHash(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*types.Block, error) {
 	if blockNr, ok := blockNrOrHash.Number(); ok {
 		return b.BlockByNumber(ctx, blockNr)
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if deadline, exists := ctx.Deadline(); exists && time.Until(deadline) < 0 {
+		return nil, errExpired
 	}
 	if hash, ok := blockNrOrHash.Hash(); ok {
-		block, err := b.BlockByHash(ctx, hash)
-		if err != nil {
-			return nil, err
-		}
-		if block == nil {
+		header := b.eth.blockchain.GetHeaderByHash(hash)
+		if header == nil {
 			return nil, errors.New("header for hash not found")
+		}
+		if blockNrOrHash.RequireCanonical && b.eth.blockchain.GetCanonicalHash(header.Number.Uint64()) != hash {
+			return nil, errors.New("hash is not currently canonical")
+		}
+		block := b.eth.blockchain.GetBlock(hash, header.Number.Uint64())
+		if block == nil {
+			return nil, errors.New("header found, but block body is missing")
 		}
 		return block, nil
 	}
 	return nil, errors.New("invalid arguments; neither block nor hash specified")
 }
 
-func (b *EthAPIBackend) BadBlocks() ([]*types.Block, []*core.BadBlockReason) {
+func (b *EthAPIBackend) BadBlocks() []*types.Block {
 	return b.eth.blockchain.BadBlocks()
+}
+
+func (b *EthAPIBackend) PendingBlockAndReceipts() (*types.Block, types.Receipts) {
+	return nil, nil
 }
 
 func (b *EthAPIBackend) StateAndHeaderByNumber(ctx context.Context, number rpc.BlockNumber) (*state.StateDB, *types.Header, error) {
@@ -227,8 +199,8 @@ func (b *EthAPIBackend) StateAndHeaderByNumberOrHash(ctx context.Context, blockN
 	if blockNr, ok := blockNrOrHash.Number(); ok {
 		return b.StateAndHeaderByNumber(ctx, blockNr)
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+	if deadline, exists := ctx.Deadline(); exists && time.Until(deadline) < 0 {
+		return nil, nil, errExpired
 	}
 	if hash, ok := blockNrOrHash.Hash(); ok {
 		header, err := b.HeaderByHash(ctx, hash)
@@ -238,6 +210,9 @@ func (b *EthAPIBackend) StateAndHeaderByNumberOrHash(ctx context.Context, blockN
 		if header == nil {
 			return nil, nil, errors.New("header for hash not found")
 		}
+		if blockNrOrHash.RequireCanonical && b.eth.blockchain.GetCanonicalHash(header.Number.Uint64()) != hash {
+			return nil, nil, errors.New("hash is not currently canonical")
+		}
 		stateDb, err := b.eth.BlockChain().StateAt(header.Root)
 		return stateDb, header, err
 	}
@@ -245,17 +220,33 @@ func (b *EthAPIBackend) StateAndHeaderByNumberOrHash(ctx context.Context, blockN
 }
 
 func (b *EthAPIBackend) GetReceipts(ctx context.Context, hash common.Hash) (types.Receipts, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if deadline, exists := ctx.Deadline(); exists && time.Until(deadline) < 0 {
+		return nil, errExpired
 	}
 	return b.eth.blockchain.GetReceiptsByHash(hash), nil
 }
 
-func (b *EthAPIBackend) GetLogs(ctx context.Context, hash common.Hash, number uint64) ([][]*types.Log, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+func (b *EthAPIBackend) GetLogs(ctx context.Context, hash common.Hash) ([][]*types.Log, error) {
+	if deadline, exists := ctx.Deadline(); exists && time.Until(deadline) < 0 {
+		return nil, errExpired
 	}
-	return b.eth.blockchain.GetLogs(hash, number), nil
+	db := b.eth.ChainDb()
+	number := rawdb.ReadHeaderNumber(db, hash)
+	if number == nil {
+		return nil, errors.New("failed to get block number from hash")
+	}
+	logs := rawdb.ReadLogs(db, hash, *number)
+	if logs == nil {
+		return nil, errors.New("failed to get logs for block")
+	}
+	return logs, nil
+}
+
+func (b *EthAPIBackend) GetTd(ctx context.Context, hash common.Hash) *big.Int {
+	if header := b.eth.blockchain.GetHeaderByHash(hash); header != nil {
+		return b.eth.blockchain.GetTd(hash, header.Number.Uint64())
+	}
+	return nil
 }
 
 func (b *EthAPIBackend) GetEVM(ctx context.Context, msg core.Message, state *state.StateDB, header *types.Header, vmConfig *vm.Config) (*vm.EVM, func() error, error) {
@@ -305,8 +296,8 @@ func (b *EthAPIBackend) SubscribeAcceptedTransactionEvent(ch chan<- core.NewTxsE
 }
 
 func (b *EthAPIBackend) SendTx(ctx context.Context, signedTx *types.Transaction) error {
-	if err := ctx.Err(); err != nil {
-		return err
+	if deadline, exists := ctx.Deadline(); exists && time.Until(deadline) < 0 {
+		return errExpired
 	}
 	return b.eth.txPool.AddLocal(signedTx)
 }
@@ -325,8 +316,6 @@ func (b *EthAPIBackend) GetPoolTransaction(hash common.Hash) *types.Transaction 
 }
 
 func (b *EthAPIBackend) GetTransaction(ctx context.Context, txHash common.Hash) (*types.Transaction, common.Hash, uint64, uint64, error) {
-	// Note: we only index transactions during Accept, so the below check against unfinalized queries is technically redundant, but
-	// we keep it for defense in depth.
 	tx, blockHash, blockNumber, index := rawdb.ReadTransaction(b.eth.ChainDb(), txHash)
 
 	// Respond as if the transaction does not exist if it is not yet in an
@@ -352,15 +341,19 @@ func (b *EthAPIBackend) Stats() (pending int, queued int) {
 }
 
 func (b *EthAPIBackend) TxPoolContent() (map[common.Address]types.Transactions, map[common.Address]types.Transactions) {
-	return b.eth.txPool.Content()
+	return b.eth.TxPool().Content()
 }
 
 func (b *EthAPIBackend) TxPoolContentFrom(addr common.Address) (types.Transactions, types.Transactions) {
-	return b.eth.txPool.ContentFrom(addr)
+	return b.eth.TxPool().ContentFrom(addr)
+}
+
+func (b *EthAPIBackend) TxPool() *core.TxPool {
+	return b.eth.TxPool()
 }
 
 func (b *EthAPIBackend) SubscribeNewTxsEvent(ch chan<- core.NewTxsEvent) event.Subscription {
-	return b.eth.txPool.SubscribeNewTxsEvent(ch)
+	return b.eth.TxPool().SubscribeNewTxsEvent(ch)
 }
 
 func (b *EthAPIBackend) EstimateBaseFee(ctx context.Context) (*big.Int, error) {
@@ -395,24 +388,8 @@ func (b *EthAPIBackend) ExtRPCEnabled() bool {
 	return b.extRPCEnabled
 }
 
-func (b *EthAPIBackend) UnprotectedAllowed(tx *types.Transaction) bool {
-	if b.allowUnprotectedTxs {
-		return true
-	}
-
-	// Check for special cased transaction hashes:
-	// Note: this map is read-only after creation, so it is safe to read from it on multiple threads.
-	if _, ok := b.allowUnprotectedTxHashes[tx.Hash()]; ok {
-		return true
-	}
-
-	// Check for "predictable pattern" (Nick's Signature: https://weka.medium.com/how-to-send-ether-to-11-440-people-187e332566b7)
-	v, r, s := tx.RawSignatureValues()
-	if v == nil || r == nil || s == nil {
-		return false
-	}
-
-	return tx.Nonce() == 0 && r.Cmp(s) == 0
+func (b *EthAPIBackend) UnprotectedAllowed() bool {
+	return b.allowUnprotectedTxs
 }
 
 func (b *EthAPIBackend) RPCGasCap() uint64 {
@@ -451,7 +428,7 @@ func (b *EthAPIBackend) GetMaxBlocksPerRequest() int64 {
 }
 
 func (b *EthAPIBackend) StateAtBlock(ctx context.Context, block *types.Block, reexec uint64, base *state.StateDB, checkLive bool, preferDisk bool) (*state.StateDB, error) {
-	return b.eth.StateAtBlock(block, reexec, base, checkLive, preferDisk)
+	return b.eth.stateAtBlock(block, reexec, base, checkLive, preferDisk)
 }
 
 func (b *EthAPIBackend) StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (core.Message, vm.BlockContext, *state.StateDB, error) {

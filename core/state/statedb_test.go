@@ -40,6 +40,7 @@ import (
 	"testing/quick"
 
 	"github.com/lasthyphen/subnet-evm/core/rawdb"
+	"github.com/lasthyphen/subnet-evm/core/types"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -111,7 +112,7 @@ func TestIntermediateLeaks(t *testing.T) {
 	}
 
 	// Commit and cross check the databases.
-	transRoot, err := transState.Commit(false, false)
+	transRoot, err := transState.Commit(false)
 	if err != nil {
 		t.Fatalf("failed to commit transition state: %v", err)
 	}
@@ -119,7 +120,7 @@ func TestIntermediateLeaks(t *testing.T) {
 		t.Errorf("can not commit trie %v to persistent database", transRoot.Hex())
 	}
 
-	finalRoot, err := finalState.Commit(false, false)
+	finalRoot, err := finalState.Commit(false)
 	if err != nil {
 		t.Fatalf("failed to commit final state: %v", err)
 	}
@@ -324,7 +325,7 @@ func newTestAction(addr common.Address, r *rand.Rand) testAction {
 			fn: func(a testAction, s *StateDB) {
 				data := make([]byte, 2)
 				binary.BigEndian.PutUint16(data, uint16(a.args[0]))
-				s.AddLog(addr, nil, data, 0)
+				s.AddLog(&types.Log{Address: addr, Data: data})
 			},
 			args: make([]int64, 1),
 		},
@@ -482,7 +483,7 @@ func (test *snapshotTest) checkEqual(state, checkstate *StateDB) error {
 func TestTouchDelete(t *testing.T) {
 	s := newStateTest()
 	s.state.GetOrNewStateObject(common.Address{})
-	root, _ := s.state.Commit(false, false)
+	root, _ := s.state.Commit(false)
 	s.state, _ = NewWithSnapshot(root, s.state.db, s.state.snap)
 
 	snapshot := s.state.Snapshot()
@@ -555,7 +556,7 @@ func TestCopyCommitCopy(t *testing.T) {
 		t.Fatalf("first copy pre-commit committed storage slot mismatch: have %x, want %x", val, common.Hash{})
 	}
 
-	copyOne.Commit(false, false)
+	copyOne.Commit(false)
 	if balance := copyOne.GetBalance(addr); balance.Cmp(big.NewInt(42)) != 0 {
 		t.Fatalf("first copy post-commit balance mismatch: have %v, want %v", balance, 42)
 	}
@@ -640,7 +641,7 @@ func TestCopyCopyCommitCopy(t *testing.T) {
 	if val := copyTwo.GetCommittedState(addr, skey); val != (common.Hash{}) {
 		t.Fatalf("second copy pre-commit committed storage slot mismatch: have %x, want %x", val, common.Hash{})
 	}
-	copyTwo.Commit(false, false)
+	copyTwo.Commit(false)
 	if balance := copyTwo.GetBalance(addr); balance.Cmp(big.NewInt(42)) != 0 {
 		t.Fatalf("second copy post-commit balance mismatch: have %v, want %v", balance, 42)
 	}
@@ -684,7 +685,7 @@ func TestDeleteCreateRevert(t *testing.T) {
 	addr := common.BytesToAddress([]byte("so"))
 	state.SetBalance(addr, big.NewInt(1))
 
-	root, _ := state.Commit(false, false)
+	root, _ := state.Commit(false)
 	state, _ = NewWithSnapshot(root, state.db, state.snap)
 
 	// Simulate self-destructing in one transaction, then create-reverting in another
@@ -696,7 +697,7 @@ func TestDeleteCreateRevert(t *testing.T) {
 	state.RevertToSnapshot(id)
 
 	// Commit the entire state and make sure we don't crash and have the correct state
-	root, _ = state.Commit(true, false)
+	root, _ = state.Commit(true)
 	state, _ = NewWithSnapshot(root, state.db, state.snap)
 
 	if state.getStateObject(addr) != nil {
@@ -720,7 +721,7 @@ func TestMissingTrieNodes(t *testing.T) {
 		a2 := common.BytesToAddress([]byte("another"))
 		state.SetBalance(a2, big.NewInt(100))
 		state.SetCode(a2, []byte{1, 2, 4})
-		root, _ = state.Commit(false, false)
+		root, _ = state.Commit(false)
 		t.Logf("root: %x", root)
 		// force-flush
 		state.Database().TrieDB().Cap(0)
@@ -744,7 +745,7 @@ func TestMissingTrieNodes(t *testing.T) {
 	}
 	// Modify the state
 	state.SetBalance(addr, big.NewInt(2))
-	root, err := state.Commit(false, false)
+	root, err := state.Commit(false)
 	if err == nil {
 		t.Fatalf("expected error, got root :%x", root)
 	}
@@ -768,7 +769,7 @@ func TestStateDBAccessList(t *testing.T) {
 		t.Helper()
 		// convert to common.Address form
 		var addresses []common.Address
-		var addressMap = make(map[common.Address]struct{})
+		addressMap := make(map[common.Address]struct{})
 		for _, astring := range astrings {
 			address := addr(astring)
 			addresses = append(addresses, address)
@@ -780,7 +781,7 @@ func TestStateDBAccessList(t *testing.T) {
 				t.Fatalf("expected %x to be in access list", address)
 			}
 		}
-		// Check that only the expected addresses are present in the access list
+		// Check that only the expected addresses are present in the acesslist
 		for address := range state.accessList.addresses {
 			if _, exist := addressMap[address]; !exist {
 				t.Fatalf("extra address %x in access list", address)
@@ -791,10 +792,10 @@ func TestStateDBAccessList(t *testing.T) {
 		if !state.AddressInAccessList(addr(addrString)) {
 			t.Fatalf("scope missing address/slots %v", addrString)
 		}
-		var address = addr(addrString)
+		address := addr(addrString)
 		// convert to common.Hash form
 		var slots []common.Hash
-		var slotMap = make(map[common.Hash]struct{})
+		slotMap := make(map[common.Hash]struct{})
 		for _, slotString := range slotStrings {
 			s := slot(slotString)
 			slots = append(slots, s)
@@ -921,45 +922,5 @@ func TestStateDBAccessList(t *testing.T) {
 	}
 	if got, exp := len(state.accessList.slots), 1; got != exp {
 		t.Fatalf("expected empty, got %d", got)
-	}
-}
-
-// Tests that account and storage tries are flushed in the correct order and that
-// no data loss occurs.
-func TestFlushOrderDataLoss(t *testing.T) {
-	// Create a state trie with many accounts and slots
-	var (
-		memdb    = rawdb.NewMemoryDatabase()
-		statedb  = NewDatabase(memdb)
-		state, _ = New(common.Hash{}, statedb, nil)
-	)
-	for a := byte(0); a < 10; a++ {
-		state.CreateAccount(common.Address{a})
-		for s := byte(0); s < 10; s++ {
-			state.SetState(common.Address{a}, common.Hash{a, s}, common.Hash{a, s})
-		}
-	}
-	root, err := state.Commit(false, false)
-	if err != nil {
-		t.Fatalf("failed to commit state trie: %v", err)
-	}
-	statedb.TrieDB().Reference(root, common.Hash{})
-	if err := statedb.TrieDB().Cap(1024); err != nil {
-		t.Fatalf("failed to cap trie dirty cache: %v", err)
-	}
-	if err := statedb.TrieDB().Commit(root, false, nil); err != nil {
-		t.Fatalf("failed to commit state trie: %v", err)
-	}
-	// Reopen the state trie from flushed disk and verify it
-	state, err = New(root, NewDatabase(memdb), nil)
-	if err != nil {
-		t.Fatalf("failed to reopen state trie: %v", err)
-	}
-	for a := byte(0); a < 10; a++ {
-		for s := byte(0); s < 10; s++ {
-			if have := state.GetState(common.Address{a}, common.Hash{a, s}); have != (common.Hash{a, s}) {
-				t.Errorf("account %d: slot %d: state mismatch: have %x, want %x", a, s, have, common.Hash{a, s})
-			}
-		}
 	}
 }

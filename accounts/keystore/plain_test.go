@@ -30,6 +30,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -39,7 +41,10 @@ import (
 )
 
 func tmpKeyStoreIface(t *testing.T, encrypted bool) (dir string, ks keyStore) {
-	d := t.TempDir()
+	d, err := ioutil.TempDir("", "geth-keystore-test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if encrypted {
 		ks = &keyStorePassphrase{d, veryLightScryptN, veryLightScryptP, true}
 	} else {
@@ -49,7 +54,8 @@ func tmpKeyStoreIface(t *testing.T, encrypted bool) (dir string, ks keyStore) {
 }
 
 func TestKeyStorePlain(t *testing.T) {
-	_, ks := tmpKeyStoreIface(t, false)
+	dir, ks := tmpKeyStoreIface(t, false)
+	defer os.RemoveAll(dir)
 
 	pass := "" // not used but required by API
 	k1, account, err := storeNewKey(ks, rand.Reader, pass)
@@ -69,7 +75,8 @@ func TestKeyStorePlain(t *testing.T) {
 }
 
 func TestKeyStorePassphrase(t *testing.T) {
-	_, ks := tmpKeyStoreIface(t, true)
+	dir, ks := tmpKeyStoreIface(t, true)
+	defer os.RemoveAll(dir)
 
 	pass := "foo"
 	k1, account, err := storeNewKey(ks, rand.Reader, pass)
@@ -89,7 +96,8 @@ func TestKeyStorePassphrase(t *testing.T) {
 }
 
 func TestKeyStorePassphraseDecryptionFail(t *testing.T) {
-	_, ks := tmpKeyStoreIface(t, true)
+	dir, ks := tmpKeyStoreIface(t, true)
+	defer os.RemoveAll(dir)
 
 	pass := "foo"
 	k1, account, err := storeNewKey(ks, rand.Reader, pass)
@@ -103,6 +111,7 @@ func TestKeyStorePassphraseDecryptionFail(t *testing.T) {
 
 func TestImportPreSaleKey(t *testing.T) {
 	dir, ks := tmpKeyStoreIface(t, true)
+	defer os.RemoveAll(dir)
 
 	// file content of a presale key file generated with:
 	// python pyethsaletool.py genwallet

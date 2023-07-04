@@ -31,6 +31,7 @@ import (
 	"testing"
 
 	"github.com/lasthyphen/subnet-evm/core/rawdb"
+	"github.com/lasthyphen/subnet-evm/ethdb"
 	"github.com/lasthyphen/subnet-evm/ethdb/memorydb"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -513,8 +514,7 @@ func TestDiskMidAccountPartialMerge(t *testing.T) {
 // TestDiskSeek tests that seek-operations work on the disk layer
 func TestDiskSeek(t *testing.T) {
 	// Create some accounts in the disk layer
-	db := rawdb.NewMemoryDatabase()
-	defer db.Close()
+	var db ethdb.Database = rawdb.NewMemoryDatabase()
 
 	// Fill even keys [0,2,4...]
 	for i := 0; i < 0xff; i += 2 {
@@ -536,7 +536,7 @@ func TestDiskSeek(t *testing.T) {
 		pos    byte
 		expkey byte
 	}
-	var cases = []testcase{
+	cases := []testcase{
 		{0xff, 0x55}, // this should exit immediately without checking key
 		{0x01, 0x02},
 		{0xfe, 0xfe},

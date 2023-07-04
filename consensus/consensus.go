@@ -30,7 +30,6 @@ package consensus
 import (
 	"math/big"
 
-	"github.com/lasthyphen/subnet-evm/commontype"
 	"github.com/lasthyphen/subnet-evm/core/state"
 	"github.com/lasthyphen/subnet-evm/core/types"
 	"github.com/lasthyphen/subnet-evm/params"
@@ -54,13 +53,6 @@ type ChainHeaderReader interface {
 
 	// GetHeaderByHash retrieves a block header from the database by its hash.
 	GetHeaderByHash(hash common.Hash) *types.Header
-
-	// GetFeeConfigAt retrieves the fee config and last changed block number at block header.
-	GetFeeConfigAt(parent *types.Header) (commontype.FeeConfig, *big.Int, error)
-
-	// GetCoinbaseAt retrieves the configured coinbase address at [parent].
-	// If fee recipients are allowed, returns true in the second return value and a predefined address in the first value.
-	GetCoinbaseAt(parent *types.Header) (common.Address, bool, error)
 }
 
 // ChainReader defines a small collection of methods needed to access the local
@@ -80,7 +72,8 @@ type Engine interface {
 	Author(header *types.Header) (common.Address, error)
 
 	// VerifyHeader checks whether a header conforms to the consensus rules of a
-	// given engine.
+	// given engine. Verifying the seal may be done optionally here, or explicitly
+	// via the VerifySeal method.
 	//
 	// NOTE: VerifyHeader does not validate the correctness of fields that rely
 	// on the contents of the block (as opposed to the current and/or parent
@@ -90,6 +83,10 @@ type Engine interface {
 	// VerifyUncles verifies that the given block's uncles conform to the consensus
 	// rules of a given engine.
 	VerifyUncles(chain ChainReader, block *types.Block) error
+
+	// VerifySeal checks whether the crypto seal on a header is valid according to
+	// the consensus rules of the given engine.
+	VerifySeal(chain ChainHeaderReader, header *types.Header) error
 
 	// Prepare initializes the consensus fields of a block header according to the
 	// rules of a particular engine. The changes are executed inline.

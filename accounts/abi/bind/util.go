@@ -32,7 +32,6 @@ import (
 	"time"
 
 	"github.com/lasthyphen/subnet-evm/core/types"
-	"github.com/lasthyphen/subnet-evm/interfaces"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/log"
 )
@@ -46,16 +45,14 @@ func WaitMined(ctx context.Context, b DeployBackend, tx *types.Transaction) (*ty
 	logger := log.New("hash", tx.Hash())
 	for {
 		receipt, err := b.TransactionReceipt(ctx, tx.Hash())
-		if err == nil {
+		if receipt != nil {
 			return receipt, nil
 		}
-
-		if errors.Is(err, interfaces.NotFound) {
-			logger.Trace("Transaction not yet mined")
-		} else {
+		if err != nil {
 			logger.Trace("Receipt retrieval failed", "err", err)
+		} else {
+			logger.Trace("Transaction not yet mined")
 		}
-
 		// Wait for the next round.
 		select {
 		case <-ctx.Done():

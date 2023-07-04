@@ -28,7 +28,7 @@
 package miner
 
 import (
-	"github.com/lasthyphen/dijetsnode/utils/timer/mockable"
+	"github.com/lasthyphen/dijetalgo/utils/timer/mockable"
 	"github.com/lasthyphen/subnet-evm/consensus"
 	"github.com/lasthyphen/subnet-evm/core"
 	"github.com/lasthyphen/subnet-evm/core/types"

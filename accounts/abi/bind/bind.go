@@ -44,13 +44,6 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 )
 
-const (
-	setAdminFuncKey      = "setAdmin"
-	setEnabledFuncKey    = "setEnabled"
-	setNoneFuncKey       = "setNone"
-	readAllowListFuncKey = "readAllowList"
-)
-
 // Lang is a target programming language selector to generate bindings for.
 type Lang int
 
@@ -60,48 +53,11 @@ const (
 	LangObjC
 )
 
-func isKeyWord(arg string) bool {
-	switch arg {
-	case "break":
-	case "case":
-	case "chan":
-	case "const":
-	case "continue":
-	case "default":
-	case "defer":
-	case "else":
-	case "fallthrough":
-	case "for":
-	case "func":
-	case "go":
-	case "goto":
-	case "if":
-	case "import":
-	case "interface":
-	case "iota":
-	case "map":
-	case "make":
-	case "new":
-	case "package":
-	case "range":
-	case "return":
-	case "select":
-	case "struct":
-	case "switch":
-	case "type":
-	case "var":
-	default:
-		return false
-	}
-
-	return true
-}
-
 // Bind generates a Go wrapper around a contract ABI. This wrapper isn't meant
 // to be used as is in client code, but rather as an intermediate struct which
 // enforces compile time type safety and naming convention opposed to having to
 // manually maintain hard coded strings that break on runtime.
-func Bind(types []string, abis []string, bytecodes []string, fsigs []map[string]string, pkg string, lang Lang, libs map[string]string, aliases map[string]string, isPrecompile bool) (string, error) {
+func Bind(types []string, abis []string, bytecodes []string, fsigs []map[string]string, pkg string, lang Lang, libs map[string]string, aliases map[string]string) (string, error) {
 	var (
 		// contracts is the map of each individual contract requested binding
 		contracts = make(map[string]*tmplContract)
@@ -142,20 +98,12 @@ func Bind(types []string, abis []string, bytecodes []string, fsigs []map[string]
 			transactIdentifiers = make(map[string]bool)
 			eventIdentifiers    = make(map[string]bool)
 		)
-
-		for _, input := range evmABI.Constructor.Inputs {
-			if hasStruct(input.Type) {
-				bindStructType[lang](input.Type, structs)
-			}
-		}
-
 		for _, original := range evmABI.Methods {
 			// Normalize the method for capital cases and non-anonymous inputs/outputs
 			normalized := original
 			normalizedName := methodNormalizer[lang](alias(aliases, original.Name))
-
 			// Ensure there is no duplicated identifier
-			var identifiers = callIdentifiers
+			identifiers := callIdentifiers
 			if !original.IsConstant() {
 				identifiers = transactIdentifiers
 			}
@@ -163,12 +111,11 @@ func Bind(types []string, abis []string, bytecodes []string, fsigs []map[string]
 				return "", fmt.Errorf("duplicated identifier \"%s\"(normalized \"%s\"), use --alias for renaming", original.Name, normalizedName)
 			}
 			identifiers[normalizedName] = true
-
 			normalized.Name = normalizedName
 			normalized.Inputs = make([]abi.Argument, len(original.Inputs))
 			copy(normalized.Inputs, original.Inputs)
 			for j, input := range normalized.Inputs {
-				if input.Name == "" || isKeyWord(input.Name) {
+				if input.Name == "" {
 					normalized.Inputs[j].Name = fmt.Sprintf("arg%d", j)
 				}
 				if hasStruct(input.Type) {
@@ -178,11 +125,6 @@ func Bind(types []string, abis []string, bytecodes []string, fsigs []map[string]
 			normalized.Outputs = make([]abi.Argument, len(original.Outputs))
 			copy(normalized.Outputs, original.Outputs)
 			for j, output := range normalized.Outputs {
-				if isPrecompile {
-					if output.Name == "" {
-						return "", fmt.Errorf("ABI outputs for %s require a name to generate the precompile binding, re-generate the ABI from a Solidity source file with all named outputs", normalized.Name)
-					}
-				}
 				if output.Name != "" {
 					normalized.Outputs[j].Name = capitalise(output.Name)
 				}
@@ -213,21 +155,11 @@ func Bind(types []string, abis []string, bytecodes []string, fsigs []map[string]
 			eventIdentifiers[normalizedName] = true
 			normalized.Name = normalizedName
 
-			used := make(map[string]bool)
 			normalized.Inputs = make([]abi.Argument, len(original.Inputs))
 			copy(normalized.Inputs, original.Inputs)
 			for j, input := range normalized.Inputs {
-				if input.Name == "" || isKeyWord(input.Name) {
+				if input.Name == "" {
 					normalized.Inputs[j].Name = fmt.Sprintf("arg%d", j)
-				}
-				// Event is a bit special, we need to define event struct in binding,
-				// ensure there is no camel-case-style name conflict.
-				for index := 0; ; index++ {
-					if !used[capitalise(normalized.Inputs[j].Name)] {
-						used[capitalise(normalized.Inputs[j].Name)] = true
-						break
-					}
-					normalized.Inputs[j].Name = fmt.Sprintf("%s%d", normalized.Inputs[j].Name, index)
 				}
 				if hasStruct(input.Type) {
 					bindStructType[lang](input.Type, structs)
@@ -250,7 +182,7 @@ func Bind(types []string, abis []string, bytecodes []string, fsigs []map[string]
 
 		contracts[types[i]] = &tmplContract{
 			Type:        capitalise(types[i]),
-			InputABI:    strings.ReplaceAll(strippedABI, "\"", "\\\""),
+			InputABI:    strings.Replace(strippedABI, "\"", "\\\"", -1),
 			InputBin:    strings.TrimPrefix(strings.TrimSpace(bytecodes[i]), "0x"),
 			Constructor: evmABI.Constructor,
 			Calls:       calls,
@@ -285,32 +217,12 @@ func Bind(types []string, abis []string, bytecodes []string, fsigs []map[string]
 		_, ok := isLib[types[i]]
 		contracts[types[i]].Library = ok
 	}
-
-	var (
-		data           interface{}
-		templateSource string
-	)
-
-	// Generate the contract template data according to contract type (precompile/non)
-	if isPrecompile {
-		if lang != LangGo {
-			return "", errors.New("only GoLang binding for precompiled contracts is supported yet")
-		}
-
-		if len(contracts) != 1 {
-			return "", errors.New("cannot generate more than 1 contract")
-		}
-		precompileType := types[0]
-		firstContract := contracts[precompileType]
-		data, templateSource = createPrecompileDataAndTemplate(firstContract, structs)
-	} else {
-		templateSource = tmplSource[lang]
-		data = &tmplData{
-			Package:   pkg,
-			Contracts: contracts,
-			Libraries: libs,
-			Structs:   structs,
-		}
+	// Generate the contract template data content and render it
+	data := &tmplData{
+		Package:   pkg,
+		Contracts: contracts,
+		Libraries: libs,
+		Structs:   structs,
 	}
 	buffer := new(bytes.Buffer)
 
@@ -320,11 +232,8 @@ func Bind(types []string, abis []string, bytecodes []string, fsigs []map[string]
 		"namedtype":     namedType[lang],
 		"capitalise":    capitalise,
 		"decapitalise":  decapitalise,
-		"convertToNil":  convertToNil,
 	}
-
-	// render the template
-	tmpl := template.Must(template.New("").Funcs(funcs).Parse(templateSource))
+	tmpl := template.Must(template.New("").Funcs(funcs).Parse(tmplSource[lang]))
 	if err := tmpl.Execute(buffer, data); err != nil {
 		return "", err
 	}
@@ -526,22 +435,15 @@ func bindStructTypeGo(kind abi.Type, structs map[string]*tmplStruct) string {
 		if s, exist := structs[id]; exist {
 			return s.Name
 		}
-		var (
-			names  = make(map[string]bool)
-			fields []*tmplField
-		)
+		var fields []*tmplField
 		for i, elem := range kind.TupleElems {
-			name := capitalise(kind.TupleRawNames[i])
-			name = abi.ResolveNameConflict(name, func(s string) bool { return names[s] })
-			names[name] = true
-			fields = append(fields, &tmplField{Type: bindStructTypeGo(*elem, structs), Name: name, SolKind: *elem})
+			field := bindStructTypeGo(*elem, structs)
+			fields = append(fields, &tmplField{Type: field, Name: capitalise(kind.TupleRawNames[i]), SolKind: *elem})
 		}
 		name := kind.TupleRawName
 		if name == "" {
 			name = fmt.Sprintf("Struct%d", len(structs))
 		}
-		name = capitalise(name)
-
 		structs[id] = &tmplStruct{
 			Name:   name,
 			Fields: fields,
@@ -655,24 +557,6 @@ func decapitalise(input string) string {
 	return strings.ToLower(goForm[:1]) + goForm[1:]
 }
 
-// convertToNil converts any type to its proper nil form.
-func convertToNil(input abi.Type) string {
-	switch input.T {
-	case abi.IntTy, abi.UintTy:
-		return "big.NewInt(0)"
-	case abi.StringTy:
-		return "\"\""
-	case abi.BoolTy:
-		return "false"
-	case abi.AddressTy:
-		return "common.Address{}"
-	case abi.HashTy:
-		return "common.Hash{}"
-	default:
-		return "nil"
-	}
-}
-
 // structured checks whether a list of ABI data types has enough information to
 // operate through a proper Go struct or if flat returns are needed.
 func structured(args abi.Arguments) bool {
@@ -709,46 +593,4 @@ func hasStruct(t abi.Type) bool {
 	default:
 		return false
 	}
-}
-
-func createPrecompileDataAndTemplate(contract *tmplContract, structs map[string]*tmplStruct) (interface{}, string) {
-	funcs := make(map[string]*tmplMethod)
-
-	for k, v := range contract.Transacts {
-		funcs[k] = v
-	}
-
-	for k, v := range contract.Calls {
-		funcs[k] = v
-	}
-	isAllowList := allowListEnabled(funcs)
-	if isAllowList {
-		// remove these functions as we will directly inherit AllowList
-		delete(funcs, readAllowListFuncKey)
-		delete(funcs, setAdminFuncKey)
-		delete(funcs, setEnabledFuncKey)
-		delete(funcs, setNoneFuncKey)
-	}
-
-	precompileContract := &tmplPrecompileContract{
-		tmplContract: contract,
-		AllowList:    isAllowList,
-		Funcs:        funcs,
-	}
-
-	data := &tmplPrecompileData{
-		Contract: precompileContract,
-		Structs:  structs,
-	}
-	return data, tmplSourcePrecompileGo
-}
-
-func allowListEnabled(funcs map[string]*tmplMethod) bool {
-	keys := []string{readAllowListFuncKey, setAdminFuncKey, setEnabledFuncKey, setNoneFuncKey}
-	for _, key := range keys {
-		if _, ok := funcs[key]; !ok {
-			return false
-		}
-	}
-	return true
 }

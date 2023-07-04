@@ -27,7 +27,7 @@ type gasPriceSetter interface {
 // handleGasPriceUpdates creates and runs an instance of
 func (vm *VM) handleGasPriceUpdates() {
 	gpu := &gasPriceUpdater{
-		setter:       vm.txPool,
+		setter:       vm.chain.GetTxPool(),
 		chainConfig:  vm.chainConfig,
 		shutdownChan: vm.shutdownChan,
 		wg:           &vm.shutdownWg,
@@ -42,7 +42,7 @@ func (gpu *gasPriceUpdater) start() {
 	if disabled := gpu.handleUpdate(gpu.setter.SetGasPrice, gpu.chainConfig.SubnetEVMTimestamp, big.NewInt(0)); disabled {
 		return
 	}
-	minBaseFee := gpu.chainConfig.FeeConfig.MinBaseFee
+	minBaseFee := gpu.chainConfig.GetFeeConfig().MinBaseFee
 	// Updates to the minimum gas price as of Subnet EVM if it's already in effect or starts a goroutine to enable it at the correct time
 	gpu.handleUpdate(gpu.setter.SetMinFee, gpu.chainConfig.SubnetEVMTimestamp, minBaseFee)
 }

@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/VictoriaMetrics/fastcache"
 	"github.com/lasthyphen/subnet-evm/core/rawdb"
 	"github.com/lasthyphen/subnet-evm/ethdb"
 	"github.com/lasthyphen/subnet-evm/trie"
@@ -90,7 +91,7 @@ func loadSnapshot(diskdb ethdb.KeyValueStore, triedb *trie.Database, cache int, 
 	snapshot := &diskLayer{
 		diskdb:    diskdb,
 		triedb:    triedb,
-		cache:     newMeteredSnapshotCache(cache * 1024 * 1024),
+		cache:     fastcache.New(cache * 1024 * 1024),
 		root:      baseRoot,
 		blockHash: baseBlockHash,
 		created:   time.Now(),
@@ -104,7 +105,7 @@ func loadSnapshot(diskdb ethdb.KeyValueStore, triedb *trie.Database, cache int, 
 		var wiper chan struct{}
 		if generator.Wiping {
 			log.Info("Resuming previous snapshot wipe")
-			wiper = WipeSnapshot(diskdb, false)
+			wiper = wipeSnapshot(diskdb, false)
 		}
 		// Whether or not wiping was in progress, load any generator progress too
 		snapshot.genMarker = generator.Marker
@@ -129,10 +130,4 @@ func loadSnapshot(diskdb ethdb.KeyValueStore, triedb *trie.Database, cache int, 
 	}
 
 	return snapshot, generator.Done, nil
-}
-
-// ResetSnapshotGeneration writes a clean snapshot generator marker to [db]
-// so no re-generation is performed after.
-func ResetSnapshotGeneration(db ethdb.KeyValueWriter) {
-	journalProgress(db, nil, nil)
 }

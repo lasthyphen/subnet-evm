@@ -28,6 +28,7 @@ package node
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -197,7 +198,7 @@ func getKeyStoreDir(conf *Config) (string, bool, error) {
 	isEphemeral := false
 	if keydir == "" {
 		// There is no datadir.
-		keydir, err = os.MkdirTemp("", "subnet-evm-keystore")
+		keydir, err = ioutil.TempDir("", "subnet-evm-keystore")
 		isEphemeral = true
 	}
 

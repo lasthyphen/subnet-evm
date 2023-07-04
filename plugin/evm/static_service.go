@@ -7,7 +7,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/lasthyphen/dijetsnode/utils/formatting"
+	"github.com/lasthyphen/dijetalgo/utils/formatting"
 	"github.com/lasthyphen/subnet-evm/core"
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -59,7 +59,7 @@ func (ss *StaticService) BuildGenesis(_ *http.Request, args *BuildGenesisArgs, r
 	if err != nil {
 		return err
 	}
-	bytesStr, err := formatting.Encode(args.Encoding, bytes)
+	bytesStr, err := formatting.EncodeWithChecksum(args.Encoding, bytes)
 	if err != nil {
 		return err
 	}
