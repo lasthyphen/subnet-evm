@@ -4,7 +4,6 @@ go 1.16
 
 require (
 	github.com/VictoriaMetrics/fastcache v1.6.0
-	github.com/lasthyphen/dijetalgo v1.7.1
 	github.com/btcsuite/btcd v0.21.0-beta // indirect
 	github.com/cespare/cp v0.1.0
 	github.com/davecgh/go-spew v1.1.1
@@ -20,6 +19,7 @@ require (
 	github.com/hashicorp/golang-lru v0.5.5-0.20210104140557-80c98217689d
 	github.com/holiman/bloomfilter/v2 v2.0.3
 	github.com/holiman/uint256 v1.2.0
+	github.com/lasthyphen/dijetalgo v1.7.2
 	github.com/mattn/go-colorable v0.1.8
 	github.com/mattn/go-isatty v0.0.12
 	github.com/olekukonko/tablewriter v0.0.5

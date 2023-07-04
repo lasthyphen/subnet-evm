@@ -18,7 +18,7 @@ import (
 	"github.com/lasthyphen/subnet-evm/core"
 	"github.com/lasthyphen/subnet-evm/core/types"
 	"github.com/lasthyphen/subnet-evm/eth/ethconfig"
-	"github.com/lasthyphen/subnet-evm/metrics/prometheus"
+	//"github.com/lasthyphen/subnet-evm/metrics/prometheus"
 	"github.com/lasthyphen/subnet-evm/node"
 	"github.com/lasthyphen/subnet-evm/params"
 
@@ -318,12 +318,12 @@ func (vm *VM) Initialize(
 	go vm.ctx.Log.RecoverAndPanic(vm.startContinuousProfiler)
 
 	// Only provide metrics if they are being populated.
-	if metrics.Enabled {
-		gatherer := prometheus.Gatherer(metrics.DefaultRegistry)
-		if err := ctx.Metrics.Register(gatherer); err != nil {
-			return err
-		}
-	}
+	//if metrics.Enabled {
+	//	gatherer := prometheus.Gatherer(metrics.DefaultRegistry)
+	//	if err := ctx.Metrics.Register(gatherer); err != nil {
+	//		return err
+	//	}
+	//}
 
 	return nil
 }
